@@ -9,7 +9,8 @@ import io.neoterm.setup.ResultListener
 import io.neoterm.utils.NLog
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
-import org.tukaani.xz.XZInputStream
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
+import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -88,9 +89,20 @@ class ProotInstaller(
 
     val url = distro.rootfsUrl(baseUrl, arch)
     setMessage("Extracting ${distro.displayName} rootfs…")
+    // A proot-distro mintájára az upstream tarballt VÁLTOZATLANUL tükrözzük a
+    // release-be, ezért a tömörítés disztrónként eltér (gz/xz). A kibontás
+    // itt, az eszközön, az app UID-jával történik: a device node-okat
+    // kihagyjuk, a könyvtárakat írhatóan hozzuk létre — így nincs szükség
+    // root-ra (szemben a CI nem-root tar-kibontásával).
     openStream(url).use { rawInput ->
       val counting = DigestStream(rawInput, digest)
-      TarArchiveInputStream(XZInputStream(BufferedInputStream(counting))).use { tar ->
+      val buffered = BufferedInputStream(counting)
+      val decompressed = when (distro.archiveExt) {
+        "tar.gz" -> GzipCompressorInputStream(buffered)
+        "tar.xz" -> XZCompressorInputStream(buffered)
+        else -> throw RuntimeException("Unsupported rootfs archive: ${distro.archiveExt}")
+      }
+      TarArchiveInputStream(decompressed).use { tar ->
         extractTar(tar, stagingDir)
       }
     }
@@ -103,10 +115,26 @@ class ProotInstaller(
       }
     }
 
+    // Néhány tarball egyetlen felső szintű könyvtárba csomagol (pl. Kali:
+    // kali-arm64/). Ha a staging tetején nincs /etc, de pontosan egy aldir van
+    // amiben van, akkor az a tényleges gyökér.
+    var sourceDir = stagingDir
+    if (!File(sourceDir, "etc").isDirectory) {
+      val subDirs = sourceDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
+      val single = subDirs.singleOrNull()
+      if (single != null && File(single, "etc").isDirectory) {
+        sourceDir = single
+      }
+    }
+
     val finalDir = File(distro.rootfsPath())
     if (finalDir.exists()) deleteRecursively(finalDir)
-    if (!stagingDir.renameTo(finalDir)) {
+    finalDir.parentFile?.mkdirs()
+    if (!sourceDir.renameTo(finalDir)) {
       throw RuntimeException("Unable to move staging rootfs into place")
+    }
+    if (sourceDir != stagingDir && stagingDir.exists()) {
+      deleteRecursively(stagingDir)
     }
   }
 

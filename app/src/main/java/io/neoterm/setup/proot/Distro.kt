@@ -16,22 +16,28 @@ enum class Distro(
   val id: String,
   val displayName: String,
   val defaultShell: String,
-  val loginArgs: Array<String>
+  val loginArgs: Array<String>,
+  /**
+   * A rootfs-archív tömörítése/kiterjesztése. A proot-distro mintájára az
+   * upstream tarballt VÁLTOZATLANUL tükrözzük a release-be (nincs CI-újra-
+   * csomagolás), így a kiterjesztés disztrónként eltér.
+   */
+  val archiveExt: String
 ) {
-  UBUNTU("ubuntu", "Ubuntu 24.04 LTS", "/bin/bash", arrayOf("--login")),
-  ALPINE("alpine", "Alpine Linux 3.20", "/bin/ash", arrayOf("-l")),
-  KALI("kali", "Kali Linux (rolling)", "/bin/bash", arrayOf("--login")),
-  ARCH("arch", "Arch Linux", "/bin/bash", arrayOf("--login"));
+  UBUNTU("ubuntu", "Ubuntu 24.04 LTS", "/bin/bash", arrayOf("--login"), "tar.gz"),
+  ALPINE("alpine", "Alpine Linux 3.20", "/bin/ash", arrayOf("-l"), "tar.gz"),
+  KALI("kali", "Kali Linux (rolling)", "/bin/bash", arrayOf("--login"), "tar.xz"),
+  ARCH("arch", "Arch Linux", "/bin/bash", arrayOf("--login"), "tar.gz");
 
   /** A disztró kibontott rootfs-ének gyökere a hoston. */
   fun rootfsPath(): String = "${NeoTermPath.ROOTFS_PATH}/$id"
 
   /**
    * A rootfs-tarball letöltési URL-je az adott archra. A GitHub Release
-   * asset-nevek laposak: `<base>/rootfs-<id>-<arch>.tar.xz`
+   * asset-nevek laposak: `<base>/rootfs-<id>-<arch>.<archiveExt>`
    */
   fun rootfsUrl(baseUrl: String, arch: String): String =
-    "$baseUrl/rootfs-$id-$arch.tar.xz"
+    "$baseUrl/rootfs-$id-$arch.$archiveExt"
 
   fun rootfsSha256Url(baseUrl: String, arch: String): String =
     "${rootfsUrl(baseUrl, arch)}.sha256"

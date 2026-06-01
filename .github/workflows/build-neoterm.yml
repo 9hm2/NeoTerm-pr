@@ -189,12 +189,13 @@ jobs:
           cp artifacts/proot-aarch64/proot assets/proot-aarch64
           # APK(ok)
           find artifacts -name '*.apk' -exec cp {} assets/ \;
-          # rootfs: artifacts/rootfs-aarch64/<distro>/aarch64.tar.xz[.sha256]
-          #      →  rootfs-<distro>-aarch64.tar.xz[.sha256]
+          # rootfs (upstream-tükör, disztrónként eltérő tömörítés):
+          #   artifacts/rootfs-aarch64/<distro>/aarch64.<ext>[.sha256]
+          #     → rootfs-<distro>-aarch64.<ext>[.sha256]
           if [ -d artifacts/rootfs-aarch64 ]; then
             for dir in artifacts/rootfs-aarch64/*/; do
               distro="$(basename "${dir}")"
-              for f in "${dir}"aarch64.tar.xz "${dir}"aarch64.tar.xz.sha256; do
+              for f in "${dir}"aarch64.*; do
                 [ -f "${f}" ] || continue
                 cp "${f}" "assets/rootfs-${distro}-$(basename "${f}")"
               done
