@@ -24,6 +24,8 @@ import io.neoterm.BuildConfig
 import io.neoterm.R
 import io.neoterm.backend.TerminalSession
 import io.neoterm.component.ComponentManager
+import io.neoterm.component.colorscheme.ColorSchemeComponent
+import io.neoterm.backend.TerminalColors
 import io.neoterm.component.config.NeoPreference
 import io.neoterm.component.profile.ProfileComponent
 import io.neoterm.component.session.ShellParameter
@@ -206,7 +208,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       override fun onSwitcherHidden(tabSwitcher: TabSwitcher) {
         toolbar.navigationIcon = null
         toolbar.setNavigationOnClickListener(null)
-        toolbar.setBackgroundResource(R.color.colorPrimary)
+        // Match the title bar + system bars to the terminal background.
+        applyTerminalSystemColors()
         // Returned to a single terminal: focus it and raise the keyboard.
         raiseKeyboardForSelectedTab()
       }
@@ -278,12 +281,6 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     }
   }
 
-  /**
-   * Grab focus on the active terminal and raise the soft keyboard. Posted to
-   * the view so it runs after the view is attached/laid out (otherwise
-   * requestFocus/showSoftInput silently no-op). No-op while the switcher
-   * overview is shown.
-   */
   fun raiseKeyboard(view: View) {
     view.post {
       if (tabSwitcher.isSwitcherShown) return@post
@@ -297,6 +294,30 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     val tab = tabSwitcher.selectedTab as? TermTab ?: return
     val view = tab.termData.termView ?: return
     raiseKeyboard(view)
+  }
+
+  /** The current terminal background color (from the active color scheme). */
+  private fun currentTerminalBackgroundColor(): Int {
+    return try {
+      val scheme = ComponentManager.getComponent<ColorSchemeComponent>().getCurrentColorScheme()
+      TerminalColors.parse(scheme.backgroundColor ?: "#14181c")
+    } catch (e: Exception) {
+      ContextCompat.getColor(this, R.color.terminal_background)
+    }
+  }
+
+  /**
+   * Match the title bar (toolbar) and the system status/navigation bars to the
+   * terminal background color. The toolbar is only recolored while the switcher
+   * overview is hidden (the overview keeps it transparent).
+   */
+  fun applyTerminalSystemColors() {
+    val bg = currentTerminalBackgroundColor()
+    if (!tabSwitcher.isSwitcherShown) {
+      toolbar.setBackgroundColor(bg)
+    }
+    window.statusBarColor = bg
+    window.navigationBarColor = bg
   }
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -833,6 +854,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
           tab.updateColorScheme()
         }
       }
+      // Keep the title bar + system bars in sync with the terminal background.
+      applyTerminalSystemColors()
 
     }, 500)
   }
