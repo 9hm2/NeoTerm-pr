@@ -165,7 +165,10 @@ jobs:
   # ── 4) GitHub Release: APK + proot + rootfs-ek ──────────────────────────
   release:
     name: Publish GitHub Release
-    if: ${{ inputs.publish_release }}
+    # Akkor is fusson, ha a fetch-rootfs elbukott — a release-be ekkor legalább
+    # az APK + proot bekerül, a rootfs-ek pedig amik elkészültek. Csak az
+    # APK/proot sikere kötelező.
+    if: ${{ always() && inputs.publish_release && needs.build-apk.result == 'success' && needs.build-proot.result == 'success' }}
     needs: [build-apk, build-proot, fetch-rootfs]
     runs-on: ubuntu-latest
     permissions:

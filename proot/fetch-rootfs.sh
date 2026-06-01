@@ -40,7 +40,19 @@ done
 
 mkdir -p "${OUT_DIR}"
 TMP="$(mktemp -d)"
-trap 'rm -rf "${TMP}"' EXIT
+# Cleanup: a rootfs-ek írásvédett (0555) könyvtárakat tartalmazhatnak, amiket a
+# sima `rm -rf` nem tud kiüríteni ("cannot remove … Permission denied"). Előbb
+# írhatóvá tesszük a teljes fát.
+cleanup() { chmod -R u+rwX "${TMP}" 2>/dev/null || true; rm -rf "${TMP}"; }
+trap cleanup EXIT
+
+# Írhatóvá tesz, majd töröl egy könyvtárat (a 0555-ös rootfs-dirök miatt).
+force_rm() {
+  local d="$1"
+  [[ -e "${d}" ]] || return 0
+  chmod -R u+rwX "${d}" 2>/dev/null || true
+  rm -rf "${d}"
+}
 
 # Verzió-pinek
 UBUNTU_RELEASE="${UBUNTU_RELEASE:-24.04}"        # 24.04 LTS (noble)
@@ -73,7 +85,7 @@ repack() {
   local raw="${TMP}/dl"
   curl -fL --retry 4 --retry-delay 2 -o "${raw}" "${url}"
   local rootfs="${TMP}/rootfs"
-  rm -rf "${rootfs}"; mkdir -p "${rootfs}"
+  force_rm "${rootfs}"; mkdir -p "${rootfs}"
   # A disztró-rootfs-ek device node-okat tartalmaznak a /dev alatt (pl. Kali:
   # dev/null, dev/console…). Ezeket nem-root userként a tar nem tudja mknod-olni
   # ("Operation not permitted") → kihagyjuk. Futásidőben úgyis a proot köti be a
@@ -88,12 +100,21 @@ repack() {
   # (helyes) módot pedig a repack megőrzi.
   local ex=( --no-same-owner --delay-directory-restore
              --exclude='dev/*' --exclude='./dev/*' --exclude='*/dev/*' )
+  # A tar egy-egy nem-kritikus tagon (pl. setuid-helper, írásvédett fájl)
+  # nem-root userként elhasalhat ("Cannot open: Permission denied"). Ezek a
+  # guest szempontjából lényegtelenek (proot alatt a uid fake-elt, a setuid
+  # értelmetlen, és apt-tal újratelepíthető). Ezért a tar hibáját TOLERÁLJUK,
+  # és lentebb /etc-jelenléttel ellenőrizzük, hogy a kibontás érdemben sikerült.
+  local tar_rc=0
+  set +e
   case "${decomp}" in
     gz)  tar -C "${rootfs}" "${ex[@]}" -xzf "${raw}" ;;
     xz)  tar -C "${rootfs}" "${ex[@]}" -xJf "${raw}" ;;
     zst) tar -C "${rootfs}" "${ex[@]}" --use-compress-program=unzstd -xf "${raw}" ;;
     *)   tar -C "${rootfs}" "${ex[@]}" -xf "${raw}" ;;
   esac
+  tar_rc=$?
+  set -e
   # Néhány bootstrap (Arch x86_64) egy extra felső szintű könyvtárba bont
   # (root.x86_64/). Ha pontosan egy dir van és nincs /etc a tetején, lépjünk be.
   if [[ ! -d "${rootfs}/etc" ]]; then
@@ -102,6 +123,14 @@ repack() {
     if [[ -n "${only}" && -d "${only}/etc" ]]; then
       rootfs="${only}"
     fi
+  fi
+  # Sanity: ha nincs /etc, a kibontás érdemben elbukott (nem csak pár fájl).
+  if [[ ! -d "${rootfs}/etc" ]]; then
+    echo "[fetch] HIBA: a kibontott rootfs-ben nincs /etc (tar rc=${tar_rc})" >&2
+    exit 9
+  fi
+  if [[ "${tar_rc}" -ne 0 ]]; then
+    echo "[fetch] FIGYELEM: a tar rc=${tar_rc} (néhány nem-kritikus tag kimaradt) — folytatjuk." >&2
   fi
   mkdir -p "$(dirname "${out_xz}")"
   # GNU tar: --numeric-owner hogy a proot --link2symlink alatt is konzisztens
