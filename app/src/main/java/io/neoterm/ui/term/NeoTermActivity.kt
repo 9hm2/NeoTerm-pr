@@ -30,6 +30,7 @@ import io.neoterm.component.config.NeoPreference
 import io.neoterm.component.profile.ProfileComponent
 import io.neoterm.component.session.ShellParameter
 import io.neoterm.component.session.ShellProfile
+import io.neoterm.component.session.ShellTermSession
 import io.neoterm.component.session.XParameter
 import io.neoterm.component.session.XSession
 import io.neoterm.frontend.session.terminal.*
@@ -362,13 +363,24 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   }
 
   override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {
-    if (key == getString(R.string.key_ui_fullscreen)) {
-      setFullScreenMode(NeoPreference.isFullScreenEnabled())
-    } else if (key == getString(R.string.key_customization_color_scheme)) {
-      if (tabSwitcher.count > 0) {
-        val tab = tabSwitcher.selectedTab
-        if (tab is TermTab) {
-          tab.updateColorScheme()
+    when (key) {
+      getString(R.string.key_ui_fullscreen) ->
+        setFullScreenMode(NeoPreference.isFullScreenEnabled())
+
+      getString(R.string.key_customization_color_scheme) -> {
+        (tabSwitcher.selectedTab as? TermTab)?.updateColorScheme()
+        applyTerminalSystemColors()
+      }
+
+      getString(R.string.key_ui_eks_enabled) -> {
+        // Show/hide the extra keys on the open tabs immediately.
+        val enabled = NeoPreference.isExtraKeysEnabled()
+        forEachTab<TermTab> { tab ->
+          (tab.termData.termSession as? ShellTermSession)?.shellProfile?.enableExtraKeys = enabled
+          tab.termData.extraKeysView?.visibility = if (enabled) View.VISIBLE else View.GONE
+          if (enabled) {
+            tab.termData.viewClient?.updateExtraKeys(tab.termData.termSession?.title, true)
+          }
         }
       }
     }
@@ -429,11 +441,9 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   }
 
   private fun forceAddSystemSession() {
-    if (!tabSwitcher.isSwitcherShown) {
-      toggleSwitcher(showSwitcher = true, easterEgg = false)
-    }
-
-    // Fore system shell mode to be enabled.
+    // Open a system shell like any other session: no switcher reveal/animation,
+    // routed through the normal add path so the current profile (extra keys,
+    // etc.) applies.
     addNewSession(null, true, createRevealAnimation())
   }
 
