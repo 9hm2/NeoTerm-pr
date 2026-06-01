@@ -45,6 +45,11 @@ android {
     abortOnError false
     checkReleaseBuilds false
   }
+  packagingOptions {
+    // A proot egy kész, statikus ELF — ne próbálja az AGP strippelni
+    // csomagoláskor (csak a libproot.so néven beágyazott proot binárist).
+    doNotStrip '*/arm64-v8a/libproot.so'
+  }
   compileOptions {
     targetCompatibility 1.8
     sourceCompatibility 1.8

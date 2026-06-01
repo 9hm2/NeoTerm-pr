@@ -53,6 +53,13 @@ class ProotInstaller(
 
   // ── proot bináris ─────────────────────────────────────────────────────
   private fun installProotBinary() {
+    // Ha a proot bele van csomagolva az APK-ba (libproot.so), nincs mit
+    // letölteni — csak a guest tmp-könyvtárat biztosítjuk.
+    if (ProotManager.bundledProotPath() != null) {
+      File(NeoTermPath.PROOT_TMP_PATH).mkdirs()
+      return
+    }
+
     setMessage("Downloading proot…")
     val target = File(NeoTermPath.PROOT_BIN_PATH)
     target.parentFile?.mkdirs()

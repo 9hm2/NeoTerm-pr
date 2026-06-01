@@ -1,5 +1,6 @@
 package io.neoterm.setup.proot
 
+import io.neoterm.App
 import io.neoterm.component.config.NeoTermPath
 import io.neoterm.component.config.NeoPreference
 import java.io.File
@@ -35,9 +36,22 @@ object ProotManager {
 
   fun selectedDistro(): Distro = Distro.fromId(NeoPreference.getProotDistro())
 
-  /** A proot bináris megvan és futtatható. */
+  /**
+   * Az APK-ba csomagolt proot bináris (jniLibs/<abi>/libproot.so), ha létezik.
+   * A natív könyvtárakat az Android a telepítéskor a nativeLibraryDir-be bontja
+   * ki futtatható joggal, így itt közvetlenül exec-elhető — letöltés nélkül.
+   */
+  fun bundledProotPath(): String? {
+    val f = File(App.get().applicationInfo.nativeLibraryDir, "libproot.so")
+    return if (f.canExecute()) f.absolutePath else null
+  }
+
+  /** A használandó proot bináris: elsőként a beépített, különben a letöltött. */
+  fun prootBinaryPath(): String = bundledProotPath() ?: NeoTermPath.PROOT_BIN_PATH
+
+  /** A proot bináris megvan és futtatható (beépített vagy letöltött). */
   fun isProotBinaryInstalled(): Boolean =
-    File(NeoTermPath.PROOT_BIN_PATH).canExecute()
+    bundledProotPath() != null || File(NeoTermPath.PROOT_BIN_PATH).canExecute()
 
   /** A megadott disztró rootfs-e telepítve van (van benne legalább /etc). */
   fun isRootfsInstalled(distro: Distro): Boolean =
@@ -111,7 +125,7 @@ object ProotManager {
     distro.loginArgs.forEach { args.add(it) }
 
     return Launch(
-      executable = NeoTermPath.PROOT_BIN_PATH,
+      executable = prootBinaryPath(),
       args = args.toTypedArray(),
       env = buildHostEnv(),
       hostCwd = NeoTermPath.PROOT_ROOT_PATH
