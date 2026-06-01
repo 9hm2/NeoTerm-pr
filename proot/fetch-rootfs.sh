@@ -43,9 +43,18 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
 # Verzió-pinek
-UBUNTU_RELEASE="${UBUNTU_RELEASE:-noble}"        # 24.04 LTS
+UBUNTU_RELEASE="${UBUNTU_RELEASE:-24.04}"        # 24.04 LTS (noble)
 ALPINE_BRANCH="${ALPINE_BRANCH:-v3.20}"
-ALPINE_VER="${ALPINE_VER:-3.20.3}"
+
+# Egy könyvtár-index (HTML) tartalmából kiszedi a mintára illeszkedő LEGÚJABB
+# fájlnevet (verzió szerint rendezve). Így nem kell pontverziót hardcode-olni
+# (az upstream fájlnevek pl. ubuntu-base-24.04.4-... pont-verziót tartalmaznak,
+# ami időről időre változik).
+latest_in_dir() {
+  local dir_url="$1" pattern="$2"
+  curl -fsSL --retry 4 --retry-delay 2 "${dir_url}" \
+    | grep -oE "${pattern}" | sort -V | uniq | tail -n1
+}
 
 # NeoTerm-arch → upstream-arch leképezés disztrónként. A NeoTerm aarch64/arm/
 # x86_64 neveket használ; az upstream mindegyik mást:
@@ -96,12 +105,21 @@ for distro in "${DISTROS[@]}"; do
     case "${distro}" in
       ubuntu)
         a="$(deb_arch "${arch}")"
-        url="https://partner-images.canonical.com/core/${UBUNTU_RELEASE}/current/ubuntu-base-${UBUNTU_RELEASE}-base-${a}.tar.gz"
-        repack "${url}" "${out}" gz ;;
+        # Ubuntu base image a cdimage.ubuntu.com-on; a fájlnév a teljes
+        # pont-verziót hordozza (ubuntu-base-24.04.4-base-arm64.tar.gz), ezért
+        # a könyvtár-indexből szedjük ki a legújabbat.
+        base="https://cdimage.ubuntu.com/ubuntu-base/releases/${UBUNTU_RELEASE}/release/"
+        file="$(latest_in_dir "${base}" "ubuntu-base-[0-9.]+-base-${a}\.tar\.gz")"
+        [[ -z "${file}" ]] && { echo "[fetch] HIBA: nincs ubuntu-base (${a}) itt: ${base}" >&2; exit 8; }
+        repack "${base}${file}" "${out}" gz ;;
       alpine)
         a="$(alpine_arch "${arch}")"
-        url="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/releases/${a}/alpine-minirootfs-${ALPINE_VER}-${a}.tar.gz"
-        repack "${url}" "${out}" gz ;;
+        # A minirootfs fájlnév pont-verziót tartalmaz (3.20.x) — a branch
+        # releases-könyvtárából a legújabbat vesszük.
+        base="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/releases/${a}/"
+        file="$(latest_in_dir "${base}" "alpine-minirootfs-[0-9.]+-${a}\.tar\.gz")"
+        [[ -z "${file}" ]] && { echo "[fetch] HIBA: nincs alpine-minirootfs (${a}) itt: ${base}" >&2; exit 8; }
+        repack "${base}${file}" "${out}" gz ;;
       kali)
         a="$(deb_arch "${arch}")"
         url="https://kali.download/nethunter-images/current/rootfs/kali-nethunter-rootfs-minimal-${a}.tar.xz"
