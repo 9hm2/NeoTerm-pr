@@ -1,0 +1,133 @@
+name: Build NeoTerm
+
+# Manuálisan indítható build. A GitHub UI-on: Actions → "Build NeoTerm" →
+# Run workflow. Lebuildeli a NeoTerm APK-t, és igény szerint a proot
+# futtatókörnyezet artefaktumait (proot bináris + disztró-rootfs-ek) is.
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "APK build típus"
+        type: choice
+        default: debug
+        options:
+          - debug
+          - release
+      build_proot:
+        description: "proot bináris buildelése (artefaktum a runtime-forráshoz)"
+        type: boolean
+        default: true
+      fetch_rootfs:
+        description: "disztró-rootfs-ek letöltése + csomagolása (lassú)"
+        type: boolean
+        default: false
+      distros:
+        description: "rootfs disztrók (szóközzel elválasztva)"
+        type: string
+        default: "ubuntu alpine kali arch"
+
+env:
+  NDK_VERSION: "21.4.7075529"
+  CMAKE_VERSION: "3.18.1"
+
+jobs:
+  # ── 1) NeoTerm APK ──────────────────────────────────────────────────────
+  build-apk:
+    name: APK (${{ inputs.build_type }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK + CMake
+        run: |
+          sdkmanager "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}" \
+                     "platforms;android-28" "build-tools;28.0.3"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Gradle assemble
+        run: |
+          chmod +x ./gradlew
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            ./gradlew :app:assembleRelease --stacktrace
+          else
+            ./gradlew :app:assembleDebug --stacktrace
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoterm-${{ inputs.build_type }}-apk
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+  # ── 2) proot bináris (opcionális) ───────────────────────────────────────
+  build-proot:
+    name: proot binary (aarch64)
+    if: ${{ inputs.build_proot }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils-aarch64-linux-gnu xxd make curl xz-utils zstd file
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: |
+          sdkmanager "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build proot
+        run: |
+          chmod +x proot/build-proot.sh
+          ./proot/build-proot.sh "${GITHUB_WORKSPACE}/out/proot/aarch64"
+
+      - name: Upload proot binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: proot-aarch64
+          path: out/proot/aarch64/proot
+          if-no-files-found: error
+
+  # ── 3) disztró-rootfs-ek (opcionális, lassú) ────────────────────────────
+  fetch-rootfs:
+    name: rootfs tarballs
+    if: ${{ inputs.fetch_rootfs }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl xz-utils zstd tar coreutils
+
+      - name: Fetch + repack rootfs
+        run: |
+          chmod +x proot/fetch-rootfs.sh
+          ./proot/fetch-rootfs.sh "${GITHUB_WORKSPACE}/out" ${{ inputs.distros }} --arch aarch64
+
+      - name: Upload rootfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-aarch64
+          path: out/rootfs/**
+          if-no-files-found: error

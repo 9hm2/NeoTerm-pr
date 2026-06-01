@@ -4,6 +4,11 @@ apply plugin: 'kotlin-android'
 android {
   compileSdkVersion rootProject.ext.android.COMPILE_SDK_VERSION
 
+  // Pinneljük az NDK-t, hogy a natív modul (libneoterm, CMake) determinisztikusan
+  // épüljön CI-ben és lokálisan is. A 21.4.x az utolsó AGP 4.1-kompatibilis sor,
+  // és tartalmazza az aarch64-linux-android24 triple-t a proot build-hez is.
+  ndkVersion rootProject.ext.android.NDK_VERSION
+
   defaultConfig {
     applicationId "io.neoterm"
     minSdkVersion rootProject.ext.android.MIN_SDK_VERSION

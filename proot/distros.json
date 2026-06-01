@@ -1,0 +1,44 @@
+{
+  "_comment": "A NeoTerm proot-runtime által támogatott disztrók és rootfs-forrásaik. A NeoTerm-pr/app .../setup/proot/Distro.kt ezt a sémát tükrözi. A 'rootfs' útvonalak a DEFAULT_PROOT_SOURCE base-URL-hez relatívak: <base>/rootfs/<id>/<arch>.tar.xz",
+  "arch_map": {
+    "comment": "NeoTerm arch (Build.SUPPORTED_ABIS → SetupHelper.determineArchName) → upstream arch",
+    "aarch64": { "deb": "arm64", "alpine": "aarch64", "alarm": "aarch64" },
+    "arm": { "deb": "armhf", "alpine": "armv7", "alarm": "armv7" },
+    "x86_64": { "deb": "amd64", "alpine": "x86_64", "alarm": null }
+  },
+  "proot": {
+    "path": "proot/<arch>/proot",
+    "built_by": "build-proot.sh",
+    "source": "termux/proot (master) — Android seccomp/kernel-hook patchekkel"
+  },
+  "distros": [
+    {
+      "id": "ubuntu",
+      "name": "Ubuntu 24.04 LTS (noble)",
+      "default_shell": "/bin/bash",
+      "package_manager": "apt",
+      "login_args": ["--login"]
+    },
+    {
+      "id": "alpine",
+      "name": "Alpine Linux 3.20",
+      "default_shell": "/bin/ash",
+      "package_manager": "apk",
+      "login_args": ["-l"]
+    },
+    {
+      "id": "kali",
+      "name": "Kali Linux (rolling, minimal nethunter rootfs)",
+      "default_shell": "/bin/bash",
+      "package_manager": "apt",
+      "login_args": ["--login"]
+    },
+    {
+      "id": "arch",
+      "name": "Arch Linux / Arch Linux ARM",
+      "default_shell": "/bin/bash",
+      "package_manager": "pacman",
+      "login_args": ["--login"]
+    }
+  ]
+}
