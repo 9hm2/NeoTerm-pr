@@ -135,22 +135,29 @@ abstract class SortedListAdapter<T : SortedListAdapter.ViewModel>(
    * altípushoz [Comparator]-t rendel; a [build]-elt comparator az első
    * illeszkedő szabályt alkalmazza.
    */
-  class ComparatorBuilder<T : ViewModel> {
-    private val orders = mutableListOf<Pair<Class<*>, Comparator<*>>>()
+  class ComparatorBuilder<VM : ViewModel> {
+    // Párhuzamos listák (Pair + star-projection helyett — a Kotlin 1.4.32
+    // frontend belső hibát dobott a generikus star-projектált Pair-re).
+    private val modelClasses = ArrayList<Class<*>>()
+    private val modelComparators = ArrayList<Comparator<Any?>>()
 
-    fun <M : T> setOrderForModel(modelClass: Class<M>, comparator: Comparator<M>): ComparatorBuilder<T> {
-      orders.add(modelClass to comparator)
+    fun <M : VM> setOrderForModel(modelClass: Class<M>, comparator: Comparator<M>): ComparatorBuilder<VM> {
+      modelClasses.add(modelClass)
+      @Suppress("UNCHECKED_CAST")
+      modelComparators.add(comparator as Comparator<Any?>)
       return this
     }
 
-    fun build(): Comparator<T> = Comparator { a, b ->
-      for ((modelClass, comparator) in orders) {
-        if (modelClass.isInstance(a) && modelClass.isInstance(b)) {
-          @Suppress("UNCHECKED_CAST")
-          return@Comparator (comparator as Comparator<Any?>).compare(a, b)
+    fun build(): Comparator<VM> = object : Comparator<VM> {
+      override fun compare(a: VM, b: VM): Int {
+        for (i in modelClasses.indices) {
+          val modelClass = modelClasses[i]
+          if (modelClass.isInstance(a) && modelClass.isInstance(b)) {
+            return modelComparators[i].compare(a, b)
+          }
         }
+        return 0
       }
-      0
     }
   }
 }
