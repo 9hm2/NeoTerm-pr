@@ -11,6 +11,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import io.neoterm.App
 import io.neoterm.R
+import io.neoterm.component.config.NeoPreference
 import io.neoterm.component.config.NeoTermPath
 import io.neoterm.component.pm.SourceHelper
 import io.neoterm.setup.*
@@ -203,14 +204,28 @@ class SetupActivity : AppCompatActivity(), View.OnClickListener, ResultListener 
   }
 
   private fun doSetup(connection: SourceConnection) {
-    SetupHelper.setup(this, connection, this)
+    if (NeoPreference.isProotEnabled()) {
+      // Proot módban a disztró-rootfs-t és a proot binárist töltjük le; a
+      // forrás (online) URL-t base-URL-ként továbbadjuk, egyébként a default.
+      val baseUrl = (connection as? NetworkConnection)?.sourceUrl
+        ?: NeoTermPath.DEFAULT_PROOT_SOURCE
+      SetupHelper.setupProot(this, this, baseUrl)
+    } else {
+      SetupHelper.setup(this, connection, this)
+    }
   }
 
   override fun onResult(error: Exception?) {
     if (error == null) {
       setResult(RESULT_OK)
-      SourceHelper.syncSource()
-      executeAptUpdate()
+      // Proot módban a csomagkezelés a guest disztrón belül történik (apt/apk/
+      // pacman), így a legacy apt-szinkron lépéseket kihagyjuk.
+      if (!NeoPreference.isProotEnabled()) {
+        SourceHelper.syncSource()
+        executeAptUpdate()
+      } else {
+        finish()
+      }
 
     } else {
       AlertDialog.Builder(this)

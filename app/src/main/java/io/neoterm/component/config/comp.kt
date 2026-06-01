@@ -66,6 +66,8 @@ object NeoPreference {
   const val KEY_CURRENT_SESSION = "neoterm_service_current_session"
   const val KEY_SYSTEM_SHELL = "neoterm_core_system_shell"
   const val KEY_SOURCES = "neoterm_package_enabled_sources"
+  const val KEY_PROOT_ENABLED = "neoterm_core_proot_enabled"
+  const val KEY_PROOT_DISTRO = "neoterm_core_proot_distro"
 
   const val VALUE_HAPPY_EGG_TRIGGER = 8
 
@@ -162,6 +164,27 @@ object NeoPreference {
 
   fun getLoginShellName(): String {
     return loadString(R.string.key_general_shell, DefaultValues.loginShell)
+  }
+
+  /**
+   * Proot mód: valódi disztró-rootfs futtatása proot alatt a Termux-stílusú
+   * natív bootstrap helyett. Az átállás óta ez az alapértelmezett.
+   */
+  fun isProotEnabled(): Boolean {
+    return loadBoolean(KEY_PROOT_ENABLED, DefaultValues.enableProot)
+  }
+
+  fun setProotEnabled(enabled: Boolean) {
+    store(KEY_PROOT_ENABLED, enabled)
+  }
+
+  /** A kiválasztott proot disztró azonosítója (ubuntu/alpine/kali/arch). */
+  fun getProotDistro(): String {
+    return loadString(KEY_PROOT_DISTRO, DefaultValues.prootDistro)
+  }
+
+  fun setProotDistro(distroId: String) {
+    store(KEY_PROOT_DISTRO, distroId)
   }
 
   fun getLoginShellPath(): String {

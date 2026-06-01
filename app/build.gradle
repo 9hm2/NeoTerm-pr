@@ -56,6 +56,10 @@ dependencies {
 
   implementation rootProject.ext.deps["kotlin-stdlib"]
 
+  // proot rootfs (.tar.xz) kibontása
+  implementation 'org.apache.commons:commons-compress:1.21'
+  implementation 'org.tukaani:xz:1.9'
+
   implementation 'org.greenrobot:eventbus:3.0.0'
   implementation 'com.github.wrdlbrnft:modular-adapter:0.2.0.6'
   implementation 'com.github.wrdlbrnft:sorted-list-adapter:0.2.0.19'

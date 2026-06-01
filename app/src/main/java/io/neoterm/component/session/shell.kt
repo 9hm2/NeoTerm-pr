@@ -14,6 +14,7 @@ import io.neoterm.component.config.NeoTermPath
 import io.neoterm.component.font.FontComponent
 import io.neoterm.component.profile.NeoProfile
 import io.neoterm.frontend.session.terminal.TermSessionCallback
+import io.neoterm.setup.proot.ProotManager
 import java.io.File
 
 /**
@@ -298,6 +299,21 @@ open class ShellTermSession private constructor(
 
     fun create(context: Context): ShellTermSession {
       val cwd = this.cwd ?: NeoTermPath.HOME_PATH
+      val callback = changeCallback ?: TermSessionCallback()
+
+      // Proot mód: a bejelentkező shellt egy valódi disztró-rootfs-ben, proot
+      // alatt indítjuk. Csak az alapértelmezett login shellt csomagoljuk be
+      // (nincs explicit executablePath, nem rendszer-shell, és a proot mód
+      // ténylegesen telepítve van) — minden más esetben a régi viselkedés.
+      if (NeoPreference.isProotEnabled() && !systemShell &&
+        this.executablePath == null && ProotManager.isInstalled()
+      ) {
+        val launch = ProotManager.buildLaunch()
+        return ShellTermSession(
+          launch.executable, launch.hostCwd, launch.args, launch.env,
+          callback, initialCommand ?: "", shellProfile
+        )
+      }
 
       val shell = this.executablePath ?: if (systemShell)
         "/system/bin/sh"
@@ -306,7 +322,6 @@ open class ShellTermSession private constructor(
 
       val args = this.args ?: mutableListOf(shell)
       val env = transformEnvironment(this.env) ?: buildEnvironment(cwd, systemShell)
-      val callback = changeCallback ?: TermSessionCallback()
       return ShellTermSession(
         shell, cwd, args.toTypedArray(), env, callback,
         initialCommand ?: "", shellProfile

@@ -23,7 +23,7 @@ open class LocalFileConnection(context: Context, uri: Uri) : OfflineUriConnectio
  * @author kiva
  */
 
-class NetworkConnection(private val sourceUrl: String) : SourceConnection {
+class NetworkConnection(val sourceUrl: String) : SourceConnection {
   private var connection: HttpURLConnection? = null
 
   @Throws(IOException::class)

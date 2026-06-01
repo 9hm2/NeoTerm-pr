@@ -7,7 +7,11 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import io.neoterm.App
 import io.neoterm.R
+import io.neoterm.component.config.NeoPreference
 import io.neoterm.component.config.NeoTermPath
+import io.neoterm.setup.proot.Distro
+import io.neoterm.setup.proot.ProotInstaller
+import io.neoterm.setup.proot.ProotManager
 import java.io.File
 import java.util.*
 
@@ -23,8 +27,13 @@ interface ResultListener {
  */
 object SetupHelper {
   fun needSetup(): Boolean {
-    val PREFIX_FILE = File(NeoTermPath.USR_PATH)
-    return !PREFIX_FILE.isDirectory
+    // Proot módban a kiválasztott disztró rootfs-e + a proot bináris kell;
+    // legacy (Termux-stílusú) módban a usr/ PREFIX könyvtár.
+    return if (NeoPreference.isProotEnabled()) {
+      !ProotManager.isInstalled()
+    } else {
+      !File(NeoTermPath.USR_PATH).isDirectory
+    }
   }
 
   fun setup(
@@ -43,6 +52,31 @@ object SetupHelper {
     progress.show()
 
     SetupThread(activity, connection, prefixFile, resultListener, progress).start()
+  }
+
+  /**
+   * A proot mód telepítése: a kiválasztott disztró rootfs-ének + a proot
+   * binárisnak a letöltése a megadott base-URL-ről.
+   */
+  fun setupProot(
+    activity: AppCompatActivity,
+    resultListener: ResultListener,
+    baseUrl: String = NeoTermPath.DEFAULT_PROOT_SOURCE,
+    distro: Distro = ProotManager.selectedDistro()
+  ) {
+    if (!needSetup()) {
+      resultListener.onResult(null)
+      return
+    }
+
+    val progress = makeProgressDialog(activity, activity.getString(R.string.installer_message))
+    progress.isIndeterminate = true
+    progress.setProgressStyle(ProgressDialog.STYLE_SPINNER)
+    progress.show()
+
+    ProotInstaller(
+      activity, distro, determineArchName(), baseUrl, resultListener, progress
+    ).start()
   }
 
   private fun makeProgressDialog(context: Context): ProgressDialog {
