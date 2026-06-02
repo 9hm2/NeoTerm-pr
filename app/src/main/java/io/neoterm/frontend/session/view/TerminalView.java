@@ -506,7 +506,21 @@ public final class TerminalView extends View {
   }
 
   public void onScreenUpdated() {
-    if (mEmulator == null) return;
+    if (mEmulator == null) {
+      // The shell produced output before the view was laid out, so the emulator
+      // was never built (updateSize() bails out when the view has no size).
+      // Try to build it now; if the view still has no size, ask for a layout
+      // pass (propagates up to the parents) so onSizeChanged() can build it and
+      // draw. Without this the first session after setup stays blank until an
+      // unrelated relayout (e.g. returning from recents).
+      updateSize();
+      if (mEmulator == null) {
+        if (getWidth() == 0 || getHeight() == 0) {
+          requestLayout();
+        }
+        return;
+      }
+    }
     boolean skipScrolling = false;
     boolean isScreenHeld = false;
 
