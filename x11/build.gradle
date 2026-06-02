@@ -94,6 +94,28 @@ tasks.register("prepareX11Sources", Copy) {
   // Overlay wins on duplicate paths (e.g. com/termux/x11/CmdEntryPoint.java).
   from("$projectDir/patched") { duplicatesStrategy = DuplicatesStrategy.INCLUDE }
   duplicatesStrategy = DuplicatesStrategy.INCLUDE
+
+  // Surgical patch: MainActivity hides the soft keyboard in onPause(), so it
+  // disappears when leaving to recents. Drop just that call (the identical hide
+  // calls for orientation-change/disconnect are left intact) so the keyboard
+  // state is preserved across recents (with windowSoftInputMode=stateUnchanged).
+  doLast {
+    def f = file("$outDir/com/termux/x11/MainActivity.java")
+    if (f.exists()) {
+      def anchor = '''    public void onPause() {
+        inputMethodManager.hideSoftInputFromWindow(getWindow().getDecorView().getRootView().getWindowToken(), 0);'''
+      def replacement = '''    public void onPause() {
+        // NeoTerm: keep the soft keyboard state when leaving (e.g. to recents);
+        // upstream hid it here unconditionally.'''
+      def text = f.text
+      if (text.contains(anchor)) {
+        f.text = text.replace(anchor, replacement)
+        logger.lifecycle("prepareX11Sources: patched MainActivity.onPause keyboard hide")
+      } else {
+        logger.warn("prepareX11Sources: onPause anchor not found — MainActivity not patched")
+      }
+    }
+  }
 }
 
 // Port of upstream's generatePrefs codegen: turns res/xml/preferences.xml into

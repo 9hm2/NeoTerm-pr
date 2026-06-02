@@ -24,7 +24,7 @@
             android:supportsPictureInPicture="true"
             android:configChanges="fontScale|orientation|screenSize|keyboard|keyboardHidden|layoutDirection|locale|mcc|mnc|navigation|screenLayout|touchscreen|uiMode|smallestScreenSize|density"
             android:resizeableActivity="true"
-            android:windowSoftInputMode="stateHidden"
+            android:windowSoftInputMode="stateUnchanged"
             android:exported="true">
             <!-- No MAIN/LAUNCHER: NeoTerm is the launcher and opens this in-process. -->
             <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
