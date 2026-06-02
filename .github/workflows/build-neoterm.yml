@@ -196,9 +196,13 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Clone termux-x11 (latest)
+      - name: Clone termux-x11 (latest, with submodules)
         run: |
-          git clone --depth 1 https://github.com/termux/termux-x11 x11src
+          # termux-x11 keeps its native deps (xorgproto, pixman, xserver, libxcb…)
+          # as git submodules under app/src/main/cpp — must recurse, or the CMake
+          # configure fails (e.g. missing xorgproto/include/X11/Xpoll.h.in).
+          git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/termux/termux-x11 x11src
           echo "termux-x11 commit: $(git -C x11src rev-parse HEAD)"
 
       - name: Build termux-x11 (its own Gradle toolchain)
