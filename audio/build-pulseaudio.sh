@@ -100,6 +100,21 @@ C
 cp "$WORK/libintl.h" "$PREFIX/include/libintl.h"
 "$CC" -shared -fPIC -o "$PREFIX/lib/libintl.so" "$WORK/libintl.c"
 
+echo "── libltdl $LIBTOOL_VERSION (autotools/NDK) ──"
+# PulseAudio loads modules via libltdl, absent on Android — cross-build it.
+LIBTOOL_VERSION="${LIBTOOL_VERSION:-2.4.7}"
+curl -L -o "$WORK/libtool.tar.gz" \
+  "https://ftpmirror.gnu.org/libtool/libtool-${LIBTOOL_VERSION}.tar.gz"
+tar -C "$WORK" -xf "$WORK/libtool.tar.gz"
+(
+  cd "$WORK/libtool-${LIBTOOL_VERSION}"
+  ./configure --host=aarch64-linux-android --prefix="$PREFIX" \
+    --enable-ltdl-install --enable-shared --disable-static \
+    CC="$CC" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" CFLAGS="-fPIC"
+  make -C libltdl -j"$(nproc)"
+  make -C libltdl install
+)
+
 echo "── PulseAudio $PA_VERSION (meson/NDK) ──"
 curl -L -o "$WORK/pa.tar.xz" \
   "https://www.freedesktop.org/software/pulseaudio/releases/pulseaudio-${PA_VERSION}.tar.xz"
