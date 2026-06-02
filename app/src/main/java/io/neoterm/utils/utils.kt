@@ -7,8 +7,9 @@ import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import io.neoterm.R
-import io.neoterm.component.config.NeoTermPath
 import io.neoterm.frontend.floating.TerminalDialog
+import io.neoterm.setup.proot.PackageAction
+import io.neoterm.setup.proot.ProotManager
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.text.DecimalFormat
@@ -51,23 +52,44 @@ fun Context.extractAssetsDir(assetDir: String, extractDir: String) = kotlin.runC
   }
 }
 
-fun Context.runApt(
-  subCommand: String, vararg extraArgs: String,
+/**
+ * Run a package-manager action with the selected distro's own package manager
+ * (apt / apk / pacman) inside proot, so it works on any rootfs instead of the
+ * legacy host apt binary.
+ */
+fun Context.runPackageManager(
+  action: PackageAction, pkg: String = "",
   autoClose: Boolean = true, block: (Result<TerminalDialog>) -> Unit
-) = TerminalDialog(this)
-  .execute(NeoTermPath.APT_BIN_PATH, arrayOf(NeoTermPath.APT_BIN_PATH, subCommand, *extraArgs))
-  .imeEnabled(true)
-  .onFinish { dialog, session ->
-    val exit = session?.exitStatus ?: 1
-    if (exit == 0) {
-      if (autoClose) dialog.dismiss()
-      block(Result.success(dialog))
-    } else {
-      dialog.setTitle(getString(R.string.error))
-      block(Result.failure(RuntimeException()))
+): TerminalDialog {
+  val distro = ProotManager.selectedDistro()
+  val command = distro.packageCommand(action, pkg)
+  val launch = ProotManager.buildLaunch(
+    distro = distro,
+    // Keep apt non-interactive so dpkg's debconf prompts don't stall.
+    extraEnv = listOf("DEBIAN_FRONTEND=noninteractive"),
+    command = command
+  )
+  // The proot launch env is "KEY=VALUE" strings; ShellParameter wants pairs.
+  val env = launch.env.map {
+    val idx = it.indexOf('=')
+    if (idx >= 0) it.substring(0, idx) to it.substring(idx + 1) else it to ""
+  }.toTypedArray()
+
+  return TerminalDialog(this)
+    .execute(launch.executable, launch.args, env, launch.hostCwd)
+    .imeEnabled(true)
+    .onFinish { dialog, session ->
+      val exit = session?.exitStatus ?: 1
+      if (exit == 0) {
+        if (autoClose) dialog.dismiss()
+        block(Result.success(dialog))
+      } else {
+        dialog.setTitle(getString(R.string.error))
+        block(Result.failure(RuntimeException()))
+      }
     }
-  }
-  .show("apt $subCommand")
+    .show(command.joinToString(" "))
+}
 
 /**
  * Get a file path from a Uri. This will get the the path for Storage Access

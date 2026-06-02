@@ -19,8 +19,9 @@ import io.neoterm.R
 import io.neoterm.component.ComponentManager
 import io.neoterm.component.config.NeoPreference
 import io.neoterm.component.pm.*
+import io.neoterm.setup.proot.PackageAction
 import io.neoterm.utils.StringDistance
-import io.neoterm.utils.runApt
+import io.neoterm.utils.runPackageManager
 import java.util.*
 
 /**
@@ -67,7 +68,7 @@ class PackageManagerActivity : AppCompatActivity(), SearchView.OnQueryTextListen
   }
 
   private fun installPackage(packageName: String?) = packageName?.let {
-    runApt("install", "-y", it, autoClose = false) {
+    runPackageManager(PackageAction.INSTALL, it, autoClose = false) {
       it.onSuccess { it.setTitle(getString(R.string.done)) }
     }
   }
@@ -156,13 +157,13 @@ class PackageManagerActivity : AppCompatActivity(), SearchView.OnQueryTextListen
     executeAptUpdate()
   }
 
-  private fun executeAptUpdate() = runApt("update") {
+  private fun executeAptUpdate() = runPackageManager(PackageAction.UPDATE) {
     it.onSuccess { refreshPackageList() }
   }
 
-  private fun executeAptUpgrade() = runApt("update") { update ->
+  private fun executeAptUpgrade() = runPackageManager(PackageAction.UPDATE) { update ->
     update.onSuccess {
-      runApt("upgrade", "-y") {
+      runPackageManager(PackageAction.UPGRADE) {
         it.onSuccess { Toast.makeText(this, R.string.apt_upgrade_ok, Toast.LENGTH_SHORT).show() }
       }
     }
@@ -208,7 +209,22 @@ class PackageManagerActivity : AppCompatActivity(), SearchView.OnQueryTextListen
       .toList()
   }
 
-  override fun onQueryTextSubmit(text: String?) = false
+  override fun onQueryTextSubmit(text: String?): Boolean {
+    // Offer to install the typed package name directly. This makes installing
+    // work on any rootfs, including distros whose catalog list isn't populated
+    // (apk/pacman), not just the browsable apt catalog.
+    val name = text?.trim().orEmpty()
+    if (name.isEmpty()) {
+      return false
+    }
+    AlertDialog.Builder(this)
+      .setTitle(R.string.install)
+      .setMessage(name)
+      .setPositiveButton(R.string.install) { _, _ -> installPackage(name) }
+      .setNegativeButton(android.R.string.no, null)
+      .show()
+    return true
+  }
 
   override fun onQueryTextChange(text: String?): Boolean {
     text?.let { adapter.edit().replaceAll(filter(models, it)).commit() }

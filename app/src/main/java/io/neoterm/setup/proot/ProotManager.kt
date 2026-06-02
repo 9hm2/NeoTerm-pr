@@ -114,7 +114,10 @@ object ProotManager {
     distro: Distro = selectedDistro(),
     loginShell: String? = null,
     guestCwd: String = "/root",
-    extraEnv: List<String> = emptyList()
+    extraEnv: List<String> = emptyList(),
+    /** Ha nem üres, a login shell helyett ezt a parancsot futtatja `sh -c`-vel
+     *  (pl. csomagkezelő-művelet), majd a session véget ér. */
+    command: List<String> = emptyList()
   ): Launch {
     val rootfs = distro.rootfsPath()
 
@@ -165,10 +168,15 @@ object ProotManager {
     args.add("TMPDIR=/tmp")
     extraEnv.forEach { if (it.isNotEmpty()) args.add(it) }
 
-    // A guest shell + login-kapcsoló(k).
+    // A guest shell + login-kapcsoló(k), vagy egy konkrét parancs `sh -c`-vel.
     val shell = loginShell ?: distro.defaultShell
     args.add(shell)
-    distro.loginArgs.forEach { args.add(it) }
+    if (command.isEmpty()) {
+      distro.loginArgs.forEach { args.add(it) }
+    } else {
+      args.add("-c")
+      args.add(command.joinToString(" "))
+    }
 
     return Launch(
       executable = prootBinaryPath(),

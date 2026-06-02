@@ -36,7 +36,10 @@ class TerminalDialog(val context: Context) {
     }
   }
 
-  fun execute(executablePath: String, arguments: Array<String>?): TerminalDialog {
+  fun execute(
+    executablePath: String, arguments: Array<String>?,
+    env: Array<Pair<String, String>>? = null, cwd: String? = null
+  ): TerminalDialog {
     if (terminalSession != null) {
       terminalSession?.finishIfRunning()
     }
@@ -52,6 +55,8 @@ class TerminalDialog(val context: Context) {
     val parameter = ShellParameter()
       .executablePath(executablePath)
       .arguments(arguments)
+      .environment(env)
+      .currentWorkingDirectory(cwd)
       .callback(terminalSessionCallback)
       .systemShell(false)
     terminalSession = Terminals.createSession(context, parameter)

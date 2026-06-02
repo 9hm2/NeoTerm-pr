@@ -5,7 +5,8 @@ import android.view.MenuItem
 import androidx.appcompat.app.AlertDialog
 import io.neoterm.R
 import io.neoterm.component.config.NeoPreference
-import io.neoterm.utils.runApt
+import io.neoterm.setup.proot.PackageAction
+import io.neoterm.utils.runPackageManager
 
 /**
  * @author kiva
@@ -38,7 +39,7 @@ class GeneralSettingsActivity : BasePreferenceActivity() {
       .setTitle(getString(R.string.shell_not_found, shellName))
       .setMessage(R.string.shell_not_found_message)
       .setPositiveButton(R.string.install) { _, _ ->
-        runApt("install", "-y", shellName) {
+        runPackageManager(PackageAction.INSTALL, shellName) {
           it.onSuccess { postChangeShell(shellName) }
         }
       }
