@@ -298,6 +298,12 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     })
     val tab = tabSwitcher.selectedTab as NeoTab?
     tab?.onResume()
+    // Match the title bar + system bars to the terminal background on every
+    // resume (incl. the very first launch), so it applies without having to
+    // change the color scheme.
+    if (!tabSwitcher.isSwitcherShown) {
+      applyTerminalSystemColors()
+    }
     // Returning from recents/background: re-raise the keyboard for the terminal.
     raiseKeyboardForSelectedTab()
   }

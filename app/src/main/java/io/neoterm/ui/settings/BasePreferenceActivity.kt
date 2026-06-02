@@ -24,6 +24,7 @@ import android.view.ViewGroup
 import androidx.annotation.LayoutRes
 import androidx.appcompat.app.ActionBar
 import androidx.appcompat.app.AppCompatDelegate
+import io.neoterm.utils.TerminalColorTheme
 
 /**
  * A [android.preference.PreferenceActivity] which implements and proxies the necessary calls
@@ -70,9 +71,30 @@ abstract class BasePreferenceActivity : PreferenceActivity() {
     delegate.addContentView(view, params)
   }
 
+  private var themeListenerAdded = false
+
   override fun onPostResume() {
     super.onPostResume()
     delegate.onPostResume()
+    applyTerminalTheme()
+  }
+
+  /**
+   * Theme the settings screen to match the terminal (background + foreground
+   * text). Reads the current color scheme fresh, so it applies on first launch
+   * without changing the scheme.
+   */
+  private fun applyTerminalTheme() {
+    val list = try {
+      listView
+    } catch (e: Exception) {
+      null
+    }
+    TerminalColorTheme.apply(this, supportActionBar, window?.decorView, list)
+    if (list != null && !themeListenerAdded) {
+      themeListenerAdded = true
+      TerminalColorTheme.keepListThemed(list, TerminalColorTheme.foreground(this))
+    }
   }
 
   override fun onTitleChanged(title: CharSequence, color: Int) {

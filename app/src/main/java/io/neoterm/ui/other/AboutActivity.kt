@@ -17,12 +17,19 @@ import de.psdev.licensesdialog.model.Notice
 import de.psdev.licensesdialog.model.Notices
 import io.neoterm.App
 import io.neoterm.R
+import io.neoterm.utils.TerminalColorTheme
 
 
 /**
  * @author kiva
  */
 class AboutActivity : AppCompatActivity() {
+  override fun onResume() {
+    super.onResume()
+    // Match the terminal colors (background + foreground text).
+    TerminalColorTheme.apply(this, supportActionBar, window?.decorView, null)
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     setContentView(R.layout.ui_about)
