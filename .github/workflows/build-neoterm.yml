@@ -27,6 +27,10 @@ on:
         description: "GitHub Release közzététele (APK + proot + rootfs)"
         type: boolean
         default: true
+      build_pulseaudio:
+        description: "PulseAudio natív cross-build (Android-oldali hang) — fejlesztés alatt"
+        type: boolean
+        default: false
 
 env:
   NDK_VERSION: "26.1.10909125"
@@ -187,6 +191,54 @@ jobs:
         with:
           name: rootfs-aarch64
           path: out/rootfs/**
+          if-no-files-found: error
+
+  # ── 3b) PulseAudio natív cross-build (Android-oldali hang, opcionális) ───
+  build-pulseaudio:
+    name: PulseAudio (aarch64)
+    if: ${{ inputs.build_pulseaudio }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config cmake gettext m4 gperf \
+            autoconf automake libtool curl xz-utils file
+
+      - name: Set up JDK 17 (Android SDK tooling)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: |
+          sdkmanager "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build PulseAudio
+        run: |
+          chmod +x audio/build-pulseaudio.sh
+          ./audio/build-pulseaudio.sh "${GITHUB_WORKSPACE}/out/pulseaudio" --api 26 --abi arm64-v8a
+
+      - name: Package
+        run: |
+          cd "${GITHUB_WORKSPACE}/out/pulseaudio"
+          tar -czf "${GITHUB_WORKSPACE}/out/pulseaudio-aarch64.tar.gz" .
+          ls -lh "${GITHUB_WORKSPACE}/out/pulseaudio-aarch64.tar.gz"
+
+      - name: Upload PulseAudio
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulseaudio-aarch64
+          path: out/pulseaudio-aarch64.tar.gz
           if-no-files-found: error
 
   # ── 4) GitHub Release: APK (X11 beágyazva) + proot + rootfs-ek ──────────
