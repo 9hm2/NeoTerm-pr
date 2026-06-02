@@ -27,6 +27,10 @@ on:
         description: "GitHub Release közzététele (APK + proot + rootfs)"
         type: boolean
         default: true
+      build_x11:
+        description: "termux-x11 natív X-szerver buildelése (forrásból) és release-be"
+        type: boolean
+        default: false
 
 env:
   NDK_VERSION: "21.4.7075529"
@@ -177,14 +181,55 @@ jobs:
           path: out/rootfs/**
           if-no-files-found: error
 
-  # ── 4) GitHub Release: APK + proot + rootfs-ek ──────────────────────────
+  # ── 3b) termux-x11 natív X-szerver (opcionális, forrásból) ──────────────
+  build-x11:
+    name: termux-x11 (aarch64)
+    if: ${{ inputs.build_x11 }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Clone termux-x11 (latest)
+        run: |
+          git clone --depth 1 https://github.com/termux/termux-x11 x11src
+          echo "termux-x11 commit: $(git -C x11src rev-parse HEAD)"
+
+      - name: Build termux-x11 (its own Gradle toolchain)
+        run: |
+          cd x11src
+          chmod +x gradlew
+          # Build only the arm64 native X server + app; its own gradle/AGP/NDK.
+          ./gradlew :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          find x11src -path '*/outputs/apk/*' -name '*.apk' -exec cp {} out/termux-x11.apk \;
+          echo "── x11 artifact ──"
+          ls -lh out
+
+      - name: Upload termux-x11 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: termux-x11
+          path: out/**
+          if-no-files-found: error
+
+  # ── 4) GitHub Release: APK + proot + rootfs-ek (+ termux-x11) ───────────
   release:
     name: Publish GitHub Release
     # Akkor is fusson, ha a fetch-rootfs elbukott — a release-be ekkor legalább
     # az APK + proot bekerül, a rootfs-ek pedig amik elkészültek. Csak az
     # APK/proot sikere kötelező.
     if: ${{ always() && inputs.publish_release && needs.build-apk.result == 'success' && needs.build-proot.result == 'success' }}
-    needs: [build-apk, build-proot, fetch-rootfs]
+    needs: [build-apk, build-proot, fetch-rootfs, build-x11]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -215,6 +260,10 @@ jobs:
                 cp "${f}" "assets/rootfs-${distro}-$(basename "${f}")"
               done
             done
+          fi
+          # termux-x11 natív X-szerver APK (ha buildelt) → a NeoTerm innen tölti/telepíti.
+          if [ -f artifacts/termux-x11/termux-x11.apk ]; then
+            cp artifacts/termux-x11/termux-x11.apk assets/termux-x11.apk
           fi
           echo "── release assets ──"
           ls -lh assets
