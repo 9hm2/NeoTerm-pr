@@ -56,6 +56,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   lateinit var tabSwitcher: TabSwitcher
   private lateinit var fullScreenHelper: FullScreenHelper
   lateinit var toolbar: Toolbar
+  private lateinit var tabDots: TabDotsIndicator
 
   var addSessionListener = createAddSessionListener()
   private var termService: NeoTermService? = null
@@ -101,6 +102,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         }
       }
     })
+
+    tabDots = findViewById(R.id.tab_dots)
 
     tabSwitcher = findViewById(R.id.tab_switcher)
     tabSwitcher.decorator = NeoTabDecorator(this)
@@ -204,6 +207,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         toolbar.animate().alpha(0f).setDuration(300).withEndAction {
           toolbar.alpha = 1f
         }.start()
+        updateTabDots()
       }
 
       override fun onSwitcherHidden(tabSwitcher: TabSwitcher) {
@@ -211,6 +215,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         toolbar.setNavigationOnClickListener(null)
         // Match the title bar + system bars to the terminal background.
         applyTerminalSystemColors()
+        updateTabDots()
         // Returned to a single terminal: focus it and raise the keyboard.
         raiseKeyboardForSelectedTab()
       }
@@ -219,10 +224,12 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         if (selectedTab is TermTab && selectedTab.termData.termSession != null) {
           NeoPreference.storeCurrentSession(selectedTab.termData.termSession!!)
         }
+        updateTabDots()
       }
 
       override fun onTabAdded(tabSwitcher: TabSwitcher, index: Int, tab: Tab, animation: Animation) {
         update_colors()
+        updateTabDots()
       }
 
       override fun onTabRemoved(tabSwitcher: TabSwitcher, index: Int, tab: Tab, animation: Animation) {
@@ -231,6 +238,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         } else if (tab is XSessionTab) {
           SessionRemover.removeXSession(termService, tab)
         }
+        updateTabDots()
       }
 
       override fun onAllTabsRemoved(tabSwitcher: TabSwitcher, tabs: Array<out Tab>, animation: Animation) {
@@ -311,6 +319,34 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     }
   }
 
+  /** The current terminal foreground color (from the active color scheme). */
+  private fun currentTerminalForegroundColor(): Int {
+    return try {
+      val scheme = ComponentManager.getComponent<ColorSchemeComponent>().getCurrentColorScheme()
+      TerminalColors.parse(scheme.foregroundColor ?: "#ffffff")
+    } catch (e: Exception) {
+      ContextCompat.getColor(this, android.R.color.white)
+    }
+  }
+
+  /**
+   * Refresh the page-dots indicator: one dot per tab, the active one
+   * highlighted. Hidden while the switcher overview is shown (the cards already
+   * show every tab) and for a single tab.
+   */
+  fun updateTabDots() {
+    if (!::tabDots.isInitialized) {
+      return
+    }
+    if (tabSwitcher.isSwitcherShown) {
+      tabDots.visibility = View.GONE
+      return
+    }
+    tabDots.setBaseColor(currentTerminalForegroundColor())
+    tabDots.setBackgroundColor(currentTerminalBackgroundColor())
+    tabDots.setTabs(tabSwitcher.count, tabSwitcher.selectedTabIndex)
+  }
+
   /**
    * Match the title bar (toolbar) and the system status/navigation bars to the
    * terminal background color. The toolbar is only recolored while the switcher
@@ -332,6 +368,9 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     var flags = window.decorView.systemUiVisibility
     flags = if (lightBackground) flags or lightBarFlags else flags and lightBarFlags.inv()
     window.decorView.systemUiVisibility = flags
+
+    // Keep the page-dots strip in sync with the terminal colors.
+    updateTabDots()
   }
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {

@@ -15,6 +15,13 @@
     android:visibility="visible"
     app:popupTheme="@style/ThemeOverlay.AppCompat.Dark"/>
 
+  <io.neoterm.ui.term.TabDotsIndicator
+    android:id="@+id/tab_dots"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/terminal_background"
+    android:visibility="gone"/>
+
 
   <de.mrapp.android.tabswitcher.TabSwitcher
     android:id="@+id/tab_switcher"
