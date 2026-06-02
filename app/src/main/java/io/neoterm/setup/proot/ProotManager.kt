@@ -153,6 +153,12 @@ object ProotManager {
       if (File(ext).isDirectory) bind(args, ext, "/sdcard")
     }
 
+    // X11: megosztott socket-könyvtár, hogy a guest GUI-appjai elérjék az
+    // (Android-oldali) X-szervert a DISPLAY=:0-n. A könyvtárat itt hozzuk létre;
+    // az X-szerver ide teszi a unix socketjét (pl. /tmp/.X11-unix/X0).
+    val x11SocketDir = File("${NeoTermPath.PROOT_ROOT_PATH}/x11").apply { mkdirs() }
+    bind(args, x11SocketDir.absolutePath, "/tmp/.X11-unix")
+
     args.add("-w"); args.add(guestCwd)
 
     // A guest környezetét tiszta lappal (`env -i`) építjük, hogy a host
@@ -166,6 +172,12 @@ object ProotManager {
     args.add("LANG=C.UTF-8")
     args.add("PS1=\\u@neoterm:\\w\\$ ")
     args.add("TMPDIR=/tmp")
+    // X11 / GUI: az Android-oldali X-szerver a :0 kijelzőn érhető el, az audio a
+    // PulseAudio TCP-n. Ártalmatlan CLI-használatnál is (a nem-GUI appok nem
+    // nyúlnak hozzá).
+    args.add("DISPLAY=:0")
+    args.add("PULSE_SERVER=127.0.0.1:4713")
+    args.add("XDG_RUNTIME_DIR=/tmp")
     extraEnv.forEach { if (it.isNotEmpty()) args.add(it) }
 
     // A guest shell + login-kapcsoló(k), vagy egy konkrét parancs `sh -c`-vel.
