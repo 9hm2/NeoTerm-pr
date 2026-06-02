@@ -109,5 +109,6 @@ open class OfflineUriConnection(private val context: Context, private val uri: U
   @Throws(IOException::class)
   override fun openInputStream(): InputStream {
     return context.contentResolver.openInputStream(uri)
+      ?: throw IOException("Cannot open input stream for $uri")
   }
 }

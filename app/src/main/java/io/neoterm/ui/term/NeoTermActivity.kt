@@ -219,8 +219,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     return true
   }
 
-  override fun onOptionsItemSelected(item: MenuItem?): Boolean {
-    return when (item?.itemId) {
+  override fun onOptionsItemSelected(item: MenuItem): Boolean {
+    return when (item.itemId) {
       R.id.menu_item_settings -> {
         startActivity(Intent(this, SettingActivity::class.java))
         true

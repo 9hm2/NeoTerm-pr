@@ -131,7 +131,7 @@ object NeoPreference {
   }
 
   fun loadString(key: String?, defaultValue: String?): String {
-    return preference!!.getString(key, defaultValue)
+    return preference!!.getString(key, defaultValue) ?: ""
   }
 
   fun loadBoolean(key: String?, defaultValue: Boolean): Boolean {
