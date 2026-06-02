@@ -60,7 +60,7 @@ fun Context.extractAssetsDir(assetDir: String, extractDir: String) = kotlin.runC
 fun Context.runPackageManager(
   action: PackageAction, pkg: String = "",
   autoClose: Boolean = true, block: (Result<TerminalDialog>) -> Unit
-): TerminalDialog {
+) {
   val distro = ProotManager.selectedDistro()
   val command = distro.packageCommand(action, pkg)
   val launch = ProotManager.buildLaunch(
@@ -75,7 +75,7 @@ fun Context.runPackageManager(
     if (idx >= 0) it.substring(0, idx) to it.substring(idx + 1) else it to ""
   }.toTypedArray()
 
-  return TerminalDialog(this)
+  TerminalDialog(this)
     .execute(launch.executable, launch.args, env, launch.hostCwd)
     .imeEnabled(true)
     .onFinish { dialog, session ->
