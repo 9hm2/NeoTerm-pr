@@ -4,11 +4,13 @@ import android.annotation.SuppressLint
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.provider.Settings
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationCompat
 import io.neoterm.R
@@ -199,7 +201,34 @@ class NeoTermService : Service() {
       mWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, EmulatorDebug.LOG_TAG)
       mWifiLock!!.acquire()
 
+      // A PARTIAL_WAKE_LOCK only reliably keeps the CPU running with the screen
+      // off if the app is exempt from Doze/battery optimization, so prompt the
+      // user to allow it when they take the lock.
+      requestDisableBatteryOptimization(pm)
+
       updateNotification()
+    }
+  }
+
+  @SuppressLint("BatteryLife")
+  private fun requestDisableBatteryOptimization(pm: PowerManager) {
+    try {
+      if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+          .setData(Uri.parse("package:$packageName"))
+          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
+      }
+    } catch (e: Exception) {
+      // Some ROMs don't expose the dialog; fall back to the general settings.
+      NLog.e("NeoTermService", "Battery optimization request failed: ${e.localizedMessage}")
+      try {
+        startActivity(
+          Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+      } catch (ignored: Exception) {
+      }
     }
   }
 
