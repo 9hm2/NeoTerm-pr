@@ -61,6 +61,45 @@ cmake -S "$WORK/libsndfile-${SNDFILE_VERSION}" -B "$WORK/sndfile-build" \
   -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF
 cmake --build "$WORK/sndfile-build" --target install -j"$(nproc)"
 
+echo "── stub libintl (bionic has no gettext/libintl) ──"
+# PulseAudio requires libintl/dgettext for NLS, absent on Android. Provide a
+# passthrough stub so it links; translations just return the original strings.
+mkdir -p "$PREFIX/include" "$PREFIX/lib"
+cat > "$WORK/libintl.h" <<'H'
+#ifndef _LIBINTL_H
+#define _LIBINTL_H
+#include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+char *gettext(const char *msgid);
+char *dgettext(const char *domainname, const char *msgid);
+char *dcgettext(const char *domainname, const char *msgid, int category);
+char *ngettext(const char *msgid1, const char *msgid2, unsigned long int n);
+char *dngettext(const char *domainname, const char *msgid1, const char *msgid2, unsigned long int n);
+char *dcngettext(const char *domainname, const char *msgid1, const char *msgid2, unsigned long int n, int category);
+char *textdomain(const char *domainname);
+char *bindtextdomain(const char *domainname, const char *dirname);
+char *bind_textdomain_codeset(const char *domainname, const char *codeset);
+#ifdef __cplusplus
+}
+#endif
+#endif
+H
+cat > "$WORK/libintl.c" <<'C'
+char *gettext(const char *m){return (char*)m;}
+char *dgettext(const char *d,const char *m){(void)d;return (char*)m;}
+char *dcgettext(const char *d,const char *m,int c){(void)d;(void)c;return (char*)m;}
+char *ngettext(const char *m1,const char *m2,unsigned long int n){return (char*)(n==1?m1:m2);}
+char *dngettext(const char *d,const char *m1,const char *m2,unsigned long int n){(void)d;return (char*)(n==1?m1:m2);}
+char *dcngettext(const char *d,const char *m1,const char *m2,unsigned long int n,int c){(void)d;(void)c;return (char*)(n==1?m1:m2);}
+char *textdomain(const char *d){return (char*)(d?d:"messages");}
+char *bindtextdomain(const char *d,const char *dir){(void)d;return (char*)dir;}
+char *bind_textdomain_codeset(const char *d,const char *cs){(void)d;return (char*)cs;}
+C
+cp "$WORK/libintl.h" "$PREFIX/include/libintl.h"
+"$CC" -shared -fPIC -o "$PREFIX/lib/libintl.so" "$WORK/libintl.c"
+
 echo "── PulseAudio $PA_VERSION (meson/NDK) ──"
 curl -L -o "$WORK/pa.tar.xz" \
   "https://www.freedesktop.org/software/pulseaudio/releases/pulseaudio-${PA_VERSION}.tar.xz"
@@ -84,6 +123,12 @@ endian = 'little'
 
 [properties]
 needs_exe_wrapper = true
+
+[built-in options]
+c_args = ['-I$PREFIX/include']
+c_link_args = ['-L$PREFIX/lib']
+cpp_args = ['-I$PREFIX/include']
+cpp_link_args = ['-L$PREFIX/lib']
 EOF
 
 meson setup "$WORK/pa-build" "$PA_SRC" \

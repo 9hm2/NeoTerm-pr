@@ -226,7 +226,7 @@ jobs:
       - name: Build PulseAudio
         run: |
           chmod +x audio/build-pulseaudio.sh
-          ./audio/build-pulseaudio.sh "${GITHUB_WORKSPACE}/out/pulseaudio" --api 26 --abi arm64-v8a
+          ./audio/build-pulseaudio.sh "${GITHUB_WORKSPACE}/out/pulseaudio" --api 28 --abi arm64-v8a
 
       - name: Package
         run: |
