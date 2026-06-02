@@ -117,6 +117,8 @@ public final class TerminalView extends View {
 
   private ActionMode mActionMode;
   private BitmapDrawable mLeftSelectionHandle, mRightSelectionHandle;
+  /** Tracks finger velocity for inertial fling when scrolling during selection. */
+  private VelocityTracker mSelectionVelocityTracker;
 
   float mScaleFactor = 1.f;
   /* final */ GestureAndScaleRecognizer mGestureRecognizer;
@@ -209,11 +211,10 @@ public final class TerminalView extends View {
 
       @Override
       public boolean onScroll(MotionEvent e, float distanceX, float distanceY) {
-        if (mEmulator == null) return true;
-        // While selecting, only block scrolling when actually dragging a handle
-        // (that moves the selection + edge auto-scroll). Otherwise scroll through
-        // the same path as without a selection so the dynamics match exactly.
-        if (mIsSelectingText && mIsDraggingHandle) return true;
+        // While selecting, scrolling is driven manually from onTouchEvent (the
+        // gesture detector suppresses onScroll right after the long-press that
+        // started the selection), so skip it here.
+        if (mEmulator == null || mIsSelectingText) return true;
 
         if (mEmulator.isMouseTrackingActive() && e.isFromSource(InputDevice.SOURCE_MOUSE)) {
           // If moving with mouse pointer while pressing button, report that instead of scroll.
@@ -223,16 +224,7 @@ public final class TerminalView extends View {
           sendMouseEventCode(e, TerminalEmulator.MOUSE_LEFT_BUTTON_MOVED, true);
         } else {
           scrolledWithFinger = true;
-          distanceY += mScrollRemainder;
-          int deltaRows = (int) (distanceY / mRenderer.mFontLineSpacing);
-
-          // 记住当前滑动到的位置
-          mScrollRemainder = distanceY - deltaRows * mRenderer.mFontLineSpacing;
-          doScroll(e, deltaRows);
-          // Keep the selection toolbar anchored to the (content-anchored) selection.
-          if (mIsSelectingText && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && mActionMode != null) {
-            mActionMode.invalidateContentRect();
-          }
+          scrollByPixels(e, distanceY);
         }
         return true;
       }
@@ -248,53 +240,20 @@ public final class TerminalView extends View {
 
       @Override
       public boolean onFling(final MotionEvent e2, float velocityX, float velocityY) {
-        if (mEmulator == null) return true;
-        // Don't fling while dragging a selection handle.
-        if (mIsSelectingText && mIsDraggingHandle) return true;
+        // While selecting, flinging is driven manually from onTouchEvent.
+        if (mEmulator == null || mIsSelectingText) return true;
 
-        // A predominantly horizontal flick pages between tabs (but not while
-        // selecting text). Vertical scrolling is unaffected (it is driven by
-        // onScroll's distanceY, which stays small during a horizontal swipe).
-        if (!mIsSelectingText && mClient != null
+        // A predominantly horizontal flick pages between tabs. Vertical
+        // scrolling is unaffected (it is driven by onScroll's distanceY, which
+        // stays small during a horizontal swipe).
+        if (mClient != null
           && Math.abs(velocityX) > Math.abs(velocityY) * 1.5f
           && Math.abs(velocityX) > dpToPx(160)) {
           mClient.onSwipe(velocityX < 0);
           return true;
         }
 
-        // Do not start scrolling until last fling has been taken care of:
-        if (!mScroller.isFinished()) return true;
-
-        final boolean mouseTrackingAtStartOfFling = mEmulator.isMouseTrackingActive();
-        float SCALE = 0.25f;
-        if (mouseTrackingAtStartOfFling) {
-          mScroller.fling(0, 0, 0, -(int) (velocityY * SCALE), 0, 0, -mEmulator.mRows / 2, mEmulator.mRows / 2);
-        } else {
-          mScroller.fling(0, mTopRow, 0, -(int) (velocityY * SCALE), 0, 0, -mEmulator.getScreen().getActiveTranscriptRows(), 0);
-        }
-
-        post(new Runnable() {
-          private int mLastY = 0;
-
-          @Override
-          public void run() {
-            if (mouseTrackingAtStartOfFling != mEmulator.isMouseTrackingActive()) {
-              mScroller.abortAnimation();
-              return;
-            }
-            if (mScroller.isFinished()) return;
-            boolean more = mScroller.computeScrollOffset();
-            int newY = mScroller.getCurrY();
-            int diff = mouseTrackingAtStartOfFling ? (newY - mLastY) : (newY - mTopRow);
-            doScroll(e2, diff);
-            if (mIsSelectingText && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && mActionMode != null) {
-              mActionMode.invalidateContentRect();
-            }
-            mLastY = newY;
-            if (more) post(this);
-          }
-        });
-
+        startFling(e2, velocityY);
         return true;
       }
 
@@ -656,6 +615,63 @@ public final class TerminalView extends View {
   /**
    * Perform a scroll, either from dragging the screen or by scrolling a mouse wheel.
    */
+  /**
+   * Scroll the terminal by a pixel delta, line-quantized with a sub-line
+   * remainder (the exact dynamics used by the normal {@code onScroll}). Used by
+   * both the gesture recognizer and the in-selection finger scroll so they feel
+   * identical.
+   */
+  void scrollByPixels(MotionEvent event, float distanceY) {
+    distanceY += mScrollRemainder;
+    int deltaRows = (int) (distanceY / mRenderer.mFontLineSpacing);
+    mScrollRemainder = distanceY - deltaRows * mRenderer.mFontLineSpacing;
+    doScroll(event, deltaRows);
+    // Keep the selection toolbar anchored to the (content-anchored) selection.
+    if (mIsSelectingText && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && mActionMode != null) {
+      mActionMode.invalidateContentRect();
+    }
+  }
+
+  /**
+   * Start an inertial fling scroll (the same momentum used by the normal
+   * {@code onFling}), so releasing a flick keeps scrolling — including while a
+   * text selection is active.
+   */
+  void startFling(final MotionEvent e2, float velocityY) {
+    // Do not start scrolling until last fling has been taken care of:
+    if (!mScroller.isFinished()) return;
+
+    final boolean mouseTrackingAtStartOfFling = mEmulator.isMouseTrackingActive();
+    float SCALE = 0.25f;
+    if (mouseTrackingAtStartOfFling) {
+      mScroller.fling(0, 0, 0, -(int) (velocityY * SCALE), 0, 0, -mEmulator.mRows / 2, mEmulator.mRows / 2);
+    } else {
+      mScroller.fling(0, mTopRow, 0, -(int) (velocityY * SCALE), 0, 0, -mEmulator.getScreen().getActiveTranscriptRows(), 0);
+    }
+
+    post(new Runnable() {
+      private int mLastY = 0;
+
+      @Override
+      public void run() {
+        if (mouseTrackingAtStartOfFling != mEmulator.isMouseTrackingActive()) {
+          mScroller.abortAnimation();
+          return;
+        }
+        if (mScroller.isFinished()) return;
+        boolean more = mScroller.computeScrollOffset();
+        int newY = mScroller.getCurrY();
+        int diff = mouseTrackingAtStartOfFling ? (newY - mLastY) : (newY - mTopRow);
+        doScroll(e2, diff);
+        if (mIsSelectingText && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && mActionMode != null) {
+          mActionMode.invalidateContentRect();
+        }
+        mLastY = newY;
+        if (more) post(this);
+      }
+    });
+  }
+
   void doScroll(MotionEvent event, int rowsDown) {
     boolean up = rowsDown < 0;
     int amount = Math.abs(rowsDown);
@@ -699,6 +715,19 @@ public final class TerminalView extends View {
         case MotionEvent.ACTION_UP:
         case MotionEvent.ACTION_CANCEL:
           mInitialTextSelection = false;
+          // If the gesture was a (non-handle) scroll, give it inertia just like
+          // a normal scroll so the dynamics match.
+          if (!mIsDraggingHandle && action == MotionEvent.ACTION_UP && mSelectionVelocityTracker != null) {
+            mSelectionVelocityTracker.computeCurrentVelocity(1000);
+            float velocityY = mSelectionVelocityTracker.getYVelocity();
+            if (Math.abs(velocityY) > dpToPx(50)) {
+              startFling(ev, velocityY);
+            }
+          }
+          if (mSelectionVelocityTracker != null) {
+            mSelectionVelocityTracker.recycle();
+            mSelectionVelocityTracker = null;
+          }
           mIsDraggingHandle = false;
           stopSelectionAutoScroll();
           break;
@@ -715,15 +744,23 @@ public final class TerminalView extends View {
           mSelectionDownX = ev.getX();
           mSelectionDownY = ev.getY();
           stopSelectionAutoScroll();
+          if (mSelectionVelocityTracker != null) mSelectionVelocityTracker.recycle();
+          mSelectionVelocityTracker = VelocityTracker.obtain();
+          mSelectionVelocityTracker.addMovement(ev);
           break;
         case MotionEvent.ACTION_MOVE:
           if (mInitialTextSelection) break;
 
           if (!mIsDraggingHandle) {
-            // Not on a handle: let the gesture recognizer scroll/fling the
-            // terminal through the same path as a normal (non-selecting) scroll,
-            // so the dynamics match. The selection stays anchored to its text
-            // (its rows are absolute, so changing mTopRow moves it with content).
+            // Not on a handle: scroll the terminal through the exact same path
+            // (pixel-quantized + remainder, and inertia on release) as a normal
+            // non-selecting scroll, so the dynamics match. The selection stays
+            // anchored to its text (its rows are absolute, so changing mTopRow
+            // moves it with the content).
+            if (mSelectionVelocityTracker != null) mSelectionVelocityTracker.addMovement(ev);
+            float distanceY = mSelectionDownY - ev.getY();
+            mSelectionDownY = ev.getY();
+            scrollByPixels(ev, distanceY);
             break;
           }
 
