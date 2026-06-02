@@ -85,6 +85,8 @@
 
   <string name="pref_general_bell">Bell</string>
   <string name="pref_general_bell_desc">Bell when receiving \'\\a\'</string>
+  <string name="bell_channel_name">Terminal bell</string>
+  <string name="bell_notification_text">Bell</string>
   <string name="pref_general_vibrate">Vibrate</string>
   <string name="pref_general_vibrate_desc">Vibrate when receiving \'\\a\'</string>
   <string name="pref_general_backspace_map_to_esc">Back key sends Esc</string>

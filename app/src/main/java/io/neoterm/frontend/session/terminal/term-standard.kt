@@ -1,11 +1,15 @@
 package io.neoterm.frontend.session.terminal
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.media.AudioAttributes
 import android.media.AudioManager
-import android.media.SoundPool
-import android.os.Build
+import android.media.RingtoneManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
@@ -14,6 +18,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.InputMethodManager
+import androidx.core.app.NotificationCompat
 import io.neoterm.BuildConfig
 import io.neoterm.R
 import io.neoterm.backend.KeyHandler
@@ -342,14 +347,13 @@ class TermSessionCallback : TerminalSession.SessionChangedCallback {
 
 class BellController {
   companion object {
-    private val BELL_DELAY_MS = 100
+    private const val BELL_DELAY_MS = 100L
+    private const val BELL_CHANNEL_ID = "neoterm_bell"
+    private const val BELL_NOTIFICATION_ID = 52020
   }
 
-  private var bellId: Int = 0
-  private var soundPool: SoundPool? = null
-  private var soundLoaded = false
-  private var pendingBell = false
   private var lastBellTime = 0L
+  private var channelReady = false
 
   fun bellOrVibrate(context: Context, session: ShellTermSession) {
     val currentTime = System.currentTimeMillis()
@@ -358,39 +362,69 @@ class BellController {
     }
     lastBellTime = currentTime
 
+    val app = context.applicationContext
+
     if (session.shellProfile.enableBell) {
-      if (soundPool == null) {
-        // Use the application context so the SoundPool doesn't hold the Activity.
-        soundPool = SoundPool.Builder().setMaxStreams(1).build()
-        soundPool!!.setOnLoadCompleteListener { pool, _, status ->
-          soundLoaded = status == 0
-          // The sample loads asynchronously; if a bell was requested before it
-          // finished, play it now so the very first bell isn't silently dropped.
-          if (soundLoaded && pendingBell) {
-            pendingBell = false
-            pool.play(bellId, 1f, 1f, 0, 0, 1f)
-          }
-        }
-        bellId = soundPool!!.load(context.applicationContext, R.raw.bell, 1)
-      }
-      if (soundLoaded) {
-        soundPool?.play(bellId, 1f, 1f, 0, 0, 1f)
-      } else {
-        pendingBell = true
-      }
+      // The terminal bell is delivered as a notification using the system's
+      // default notification sound, so it sounds consistent with the rest of
+      // the system and also alerts the user when the app is in the background.
+      postBellNotification(app)
     }
 
     if (session.shellProfile.enableVibrate) {
-      val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+      val vibrator = app.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
       if (vibrator != null && vibrator.hasVibrator()) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-          vibrator.vibrate(VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE))
-        } else {
-          @Suppress("DEPRECATION")
-          vibrator.vibrate(100)
-        }
+        vibrator.vibrate(VibrationEffect.createOneShot(120, VibrationEffect.DEFAULT_AMPLITUDE))
       }
     }
+  }
+
+  private fun postBellNotification(context: Context) {
+    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    ensureChannel(context, manager)
+
+    val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+      ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val contentIntent = if (launch != null) {
+      PendingIntent.getActivity(
+        context, 0, launch,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+      )
+    } else null
+
+    val builder = NotificationCompat.Builder(context, BELL_CHANNEL_ID)
+      .setSmallIcon(R.drawable.ic_terminal_running)
+      .setContentTitle(context.getString(R.string.app_name))
+      .setContentText(context.getString(R.string.bell_notification_text))
+      .setAutoCancel(true)
+      .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+      .setPriority(NotificationCompat.PRIORITY_HIGH)
+      .setTimeoutAfter(4000)
+    if (contentIntent != null) builder.setContentIntent(contentIntent)
+
+    manager.notify(BELL_NOTIFICATION_ID, builder.build())
+  }
+
+  private fun ensureChannel(context: Context, manager: NotificationManager) {
+    if (channelReady) return
+    val channel = NotificationChannel(
+      BELL_CHANNEL_ID,
+      context.getString(R.string.bell_channel_name),
+      NotificationManager.IMPORTANCE_HIGH
+    )
+    val sound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+    if (sound != null) {
+      val attrs = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+        .build()
+      channel.setSound(sound, attrs)
+    }
+    // Vibration is governed by the separate "Vibrate" setting, not the channel.
+    channel.enableVibration(false)
+    channel.setShowBadge(false)
+    manager.createNotificationChannel(channel)
+    channelReady = true
   }
 }
 
