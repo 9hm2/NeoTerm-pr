@@ -2,12 +2,16 @@ apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
 android {
-  compileSdkVersion rootProject.ext.android.COMPILE_SDK_VERSION
+  namespace "io.neoterm"
+  compileSdk rootProject.ext.android.COMPILE_SDK_VERSION
 
-  // Pinneljük az NDK-t, hogy a natív modul (libneoterm, CMake) determinisztikusan
-  // épüljön CI-ben és lokálisan is. A 21.4.x az utolsó AGP 4.1-kompatibilis sor,
-  // és tartalmazza az aarch64-linux-android24 triple-t a proot build-hez is.
+  // Az NDK-t pinneljük, hogy a natív modul (libneoterm, CMake) determinisztikusan
+  // épüljön. AGP 8 modern NDK-t igényel.
   ndkVersion rootProject.ext.android.NDK_VERSION
+
+  buildFeatures {
+    buildConfig true
+  }
 
   defaultConfig {
     applicationId "io.neoterm"
@@ -59,21 +63,22 @@ android {
       path "CMakeLists.txt"
     }
   }
-  lintOptions {
+  lint {
     abortOnError false
     checkReleaseBuilds false
   }
-  packagingOptions {
-    // A proot egy kész, statikus ELF — ne próbálja az AGP strippelni
-    // csomagoláskor (csak a libproot.so néven beágyazott proot binárist).
-    doNotStrip '*/arm64-v8a/libproot.so'
+  packaging {
+    jniLibs {
+      // A proot egy kész, statikus ELF — ne strippelje az AGP csomagoláskor.
+      keepDebugSymbols += '*/arm64-v8a/libproot.so'
+    }
   }
   compileOptions {
     targetCompatibility 1.8
     sourceCompatibility 1.8
   }
   kotlinOptions {
-    freeCompilerArgs = ["-Xallow-result-return-type"]
+    jvmTarget = "1.8"
   }
 }
 
