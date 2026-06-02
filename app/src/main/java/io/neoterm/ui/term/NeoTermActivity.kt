@@ -61,29 +61,21 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   var addSessionListener = createAddSessionListener()
   private var termService: NeoTermService? = null
 
+  // First-launch startup is gated on BOTH the service being connected AND the
+  // runtime permissions having been handled, so setup never races ahead of the
+  // permission prompts (and the prompts come first).
+  private var serviceConnected = false
+  private var permissionsHandled = false
+  private var startupProceeded = false
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-
-    NeoPermission.initAppPermission(this, NeoPermission.REQUEST_APP_PERMISSION)
 
     val fullscreen = NeoPreference.isFullScreenEnabled()
     if (fullscreen) {
       window.setFlags(
         WindowManager.LayoutParams.FLAG_FULLSCREEN,
         WindowManager.LayoutParams.FLAG_FULLSCREEN
-      )
-    }
-
-    val SDCARD_PERMISSIONS_REQUEST_WRITE_EXTERNAL_STORAGE = 1
-    if (ContextCompat.checkSelfPermission(
-        this,
-        Manifest.permission.WRITE_EXTERNAL_STORAGE
-      ) != PackageManager.PERMISSION_GRANTED
-    ) {
-      ActivityCompat.requestPermissions(
-        this,
-        arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
-        SDCARD_PERMISSIONS_REQUEST_WRITE_EXTERNAL_STORAGE
       )
     }
 
@@ -113,6 +105,61 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     val serviceIntent = Intent(this, NeoTermService::class.java)
     startService(serviceIntent)
     bindService(serviceIntent, this, 0)
+
+    // Ask for the runtime permissions up front, before any setup runs.
+    requestStartupPermissions()
+  }
+
+  /**
+   * Request the storage and (on Android 13+) notification permissions first, so
+   * the user grants them before the setup/download starts and before the
+   * foreground-service notification needs them.
+   */
+  private fun requestStartupPermissions() {
+    val needed = ArrayList<String>()
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+      != PackageManager.PERMISSION_GRANTED
+    ) {
+      needed.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+      needed.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+    // POST_NOTIFICATIONS is only a runtime permission on Android 13 (API 33)+.
+    // The constants aren't in compileSdk 28 (kept at 28 on purpose for proot's
+    // exec behaviour), so use the literals.
+    if (android.os.Build.VERSION.SDK_INT >= 33 &&
+      ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS")
+      != PackageManager.PERMISSION_GRANTED
+    ) {
+      needed.add("android.permission.POST_NOTIFICATIONS")
+    }
+
+    if (needed.isEmpty()) {
+      onStartupPermissionsHandled()
+    } else {
+      ActivityCompat.requestPermissions(this, needed.toTypedArray(), NeoPermission.REQUEST_APP_PERMISSION)
+    }
+  }
+
+  private fun onStartupPermissionsHandled() {
+    permissionsHandled = true
+    maybeStartup()
+  }
+
+  /**
+   * Proceed to setup (or open the first session) only once the service is
+   * connected *and* the permissions have been handled. Runs at most once.
+   */
+  private fun maybeStartup() {
+    if (!serviceConnected || !permissionsHandled || startupProceeded || isRecreating()) {
+      return
+    }
+    startupProceeded = true
+    if (SetupHelper.needSetup()) {
+      startActivityForResult(Intent(this, SetupActivity::class.java), REQUEST_SETUP)
+    } else {
+      enterMain()
+      update_colors()
+    }
   }
 
   private fun toggleToolbar(toolbar: Toolbar?, visible: Boolean) {
@@ -396,15 +443,10 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
     when (requestCode) {
       NeoPermission.REQUEST_APP_PERMISSION -> {
-        if (grantResults.isEmpty()
-          || grantResults[0] != PackageManager.PERMISSION_GRANTED
-        ) {
-          AlertDialog.Builder(this).setMessage(R.string.permission_denied)
-            .setPositiveButton(android.R.string.ok, { _: DialogInterface, _: Int ->
-              finish()
-            })
-            .show()
-        }
+        // Storage/notifications are best-effort: the rootfs lives in internal
+        // storage, so the app still works if they are declined. Proceed with
+        // startup regardless of the result instead of killing the app.
+        onStartupPermissionsHandled()
         return
       }
     }
@@ -447,15 +489,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       return
     }
 
-    if (!isRecreating()) {
-      if (SetupHelper.needSetup()) {
-        val intent = Intent(this, SetupActivity::class.java)
-        startActivityForResult(intent, REQUEST_SETUP)
-        return
-      }
-      enterMain()
-      update_colors()
-    }
+    serviceConnected = true
+    maybeStartup()
   }
 
   override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

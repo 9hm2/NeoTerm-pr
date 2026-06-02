@@ -108,13 +108,18 @@ class NeoTabDecorator(val context: NeoTermActivity) : TabSwitcherDecorator() {
           //
           // A short fade-in also gives a subtle transition when opening,
           // switching or closing tabs, and hides the first-frame layout glitch
-          // on the very first launch (the view starts invisible and fades in
-          // once it has been laid out and redrawn).
-          terminalView.alpha = 0f
+          // on the very first launch. alpha is dropped to 0 only inside the
+          // posted block, right before the animation starts, and forced back to
+          // 1 when it ends, so the terminal can never be left invisible if the
+          // animation is interrupted (which previously looked like "the first
+          // window doesn't open").
           terminalView.post {
             terminalView.updateSize()
             terminalView.onScreenUpdated()
-            terminalView.animate().alpha(1f).setDuration(120).start()
+            terminalView.alpha = 0f
+            terminalView.animate().alpha(1f).setDuration(120)
+              .withEndAction { terminalView.alpha = 1f }
+              .start()
           }
         }
       }

@@ -85,8 +85,7 @@ object SetupHelper {
     }
 
     val progress = makeProgressDialog(activity, activity.getString(R.string.installer_message))
-    progress.isIndeterminate = true
-    progress.setProgressStyle(ProgressDialog.STYLE_SPINNER)
+    progress.max = 100
     progress.show()
 
     ProotInstaller(

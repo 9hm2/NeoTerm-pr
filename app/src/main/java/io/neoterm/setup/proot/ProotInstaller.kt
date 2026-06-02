@@ -108,14 +108,19 @@ class ProotInstaller(
     val digest = MessageDigest.getInstance("SHA-256")
 
     val url = distro.rootfsUrl(baseUrl, arch)
-    setMessage("Extracting ${distro.displayName} rootfs…")
+    setMessage(activity.getString(R.string.setup_downloading_rootfs, distro.displayName))
     // A proot-distro mintájára az upstream tarballt VÁLTOZATLANUL tükrözzük a
     // release-be, ezért a tömörítés disztrónként eltér (gz/xz). A kibontás
     // itt, az eszközön, az app UID-jával történik: a device node-okat
     // kihagyjuk, a könyvtárakat írhatóan hozzuk létre — így nincs szükség
     // root-ra (szemben a CI nem-root tar-kibontásával).
-    openStream(url).use { rawInput ->
-      val counting = DigestStream(rawInput, digest)
+    //
+    // A letöltés + kibontás egyetlen streamen át történik, így a hálózatról
+    // beolvasott bájtok aránya jó folyamatjelzést ad a teljes műveletről.
+    val (rawInput, totalBytes) = openStreamWithLength(url)
+    setProgressIndeterminate(totalBytes <= 0)
+    rawInput.use { input ->
+      val counting = DigestStream(input, digest, totalBytes) { percent -> setProgress(percent) }
       val buffered = BufferedInputStream(counting)
       val decompressed = when (distro.archiveExt) {
         "tar.gz" -> GzipCompressorInputStream(buffered)
@@ -261,6 +266,11 @@ class ProotInstaller(
 
   // ── hálózat / IO segédek ──────────────────────────────────────────────
   private fun openStream(urlString: String): java.io.InputStream {
+    return openStreamWithLength(urlString).first
+  }
+
+  /** Megnyit egy letöltést, és visszaadja a tartalom hosszát is (-1 ha ismeretlen). */
+  private fun openStreamWithLength(urlString: String): Pair<java.io.InputStream, Long> {
     val connection = URL(urlString).openConnection() as HttpURLConnection
     connection.connectTimeout = 15000
     connection.readTimeout = 30000
@@ -268,7 +278,7 @@ class ProotInstaller(
     if (connection.responseCode !in 200..299) {
       throw RuntimeException("HTTP ${connection.responseCode} for $urlString")
     }
-    return BufferedInputStream(connection.inputStream)
+    return BufferedInputStream(connection.inputStream) to connection.contentLengthLong
   }
 
   private fun fetchSha256(urlString: String): String? {
@@ -322,6 +332,17 @@ class ProotInstaller(
     runCatching { progressDialog.setMessage(message) }
   }
 
+  private fun setProgress(percent: Int) = activity.runOnUiThread {
+    runCatching {
+      progressDialog.isIndeterminate = false
+      progressDialog.progress = percent
+    }
+  }
+
+  private fun setProgressIndeterminate(indeterminate: Boolean) = activity.runOnUiThread {
+    runCatching { progressDialog.isIndeterminate = indeterminate }
+  }
+
   private fun postSuccess() = activity.runOnUiThread {
     runCatching { resultListener.onResult(null) }
   }
@@ -334,20 +355,45 @@ class ProotInstaller(
     runCatching { progressDialog.dismiss() }
   }
 
-  /** Áteresztő stream, amely menet közben sha256-ot számol a nyers bájtokra. */
+  /**
+   * Áteresztő stream, amely menet közben sha256-ot számol a nyers bájtokra, és
+   * a beolvasott bájtok arányában jelez vissza a folyamatjelzőnek (csak akkor,
+   * ha a százalék egész értéke változik, hogy ne árassza el az UI-szálat).
+   */
   private class DigestStream(
     private val wrapped: java.io.InputStream,
-    private val digest: MessageDigest
+    private val digest: MessageDigest,
+    private val totalBytes: Long,
+    private val onProgress: (percent: Int) -> Unit
   ) : java.io.InputStream() {
+    private var bytesRead = 0L
+    private var lastPercent = -1
+
+    private fun advance(count: Int) {
+      if (count <= 0 || totalBytes <= 0) return
+      bytesRead += count
+      val percent = ((bytesRead * 100) / totalBytes).toInt().coerceIn(0, 100)
+      if (percent != lastPercent) {
+        lastPercent = percent
+        onProgress(percent)
+      }
+    }
+
     override fun read(): Int {
       val b = wrapped.read()
-      if (b != -1) digest.update(b.toByte())
+      if (b != -1) {
+        digest.update(b.toByte())
+        advance(1)
+      }
       return b
     }
 
     override fun read(b: ByteArray, off: Int, len: Int): Int {
       val read = wrapped.read(b, off, len)
-      if (read > 0) digest.update(b, off, read)
+      if (read > 0) {
+        digest.update(b, off, read)
+        advance(read)
+      }
       return read
     }
 
