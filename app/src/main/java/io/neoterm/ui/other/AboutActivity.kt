@@ -11,6 +11,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import de.psdev.licensesdialog.LicensesDialog
 import de.psdev.licensesdialog.licenses.ApacheSoftwareLicense20
+import de.psdev.licensesdialog.licenses.GnuGeneralPublicLicense20
 import de.psdev.licensesdialog.licenses.GnuGeneralPublicLicense30
 import de.psdev.licensesdialog.licenses.MITLicense
 import de.psdev.licensesdialog.model.Notice
@@ -46,9 +47,41 @@ class AboutActivity : AppCompatActivity() {
       val notices = Notices()
       notices.addNotice(
         Notice(
-          "ADBToolkitInstaller",
-          "https://github.com/Crixec/ADBToolKitsInstaller",
-          "Copyright (c) 2017 Crixec",
+          "PRoot",
+          "https://github.com/termux/proot",
+          "Copyright (C) 2010-2016 STMicroelectronics, 2015-2024 Termux",
+          GnuGeneralPublicLicense20()
+        )
+      )
+      notices.addNotice(
+        Notice(
+          "proot-distro",
+          "https://github.com/termux/proot-distro",
+          "Copyright (C) 2020-2024 Termux",
+          GnuGeneralPublicLicense30()
+        )
+      )
+      notices.addNotice(
+        Notice(
+          "Apache Commons Compress",
+          "https://commons.apache.org/proper/commons-compress/",
+          "Copyright 2002-2021 The Apache Software Foundation",
+          ApacheSoftwareLicense20()
+        )
+      )
+      notices.addNotice(
+        Notice(
+          "XZ for Java",
+          "https://tukaani.org/xz/java.html",
+          "Public Domain (Lasse Collin and others)",
+          MITLicense()
+        )
+      )
+      notices.addNotice(
+        Notice(
+          "Termux",
+          "https://termux.com",
+          "Copyright 2016-2024 Fredrik Fornwall",
           GnuGeneralPublicLicense30()
         )
       )
@@ -86,24 +119,8 @@ class AboutActivity : AppCompatActivity() {
       )
       notices.addNotice(
         Notice(
-          "ModularAdapter",
-          "https://wrdlbrnft.github.io/ModularAdapter",
-          "Copyright (c) 2017 Wrdlbrnft",
-          MITLicense()
-        )
-      )
-      notices.addNotice(
-        Notice(
-          "RecyclerTabLayout",
-          "https://github.com/nshmura/RecyclerTabLayout",
-          "Copyright (C) 2017 nshmura",
-          ApacheSoftwareLicense20()
-        )
-      )
-      notices.addNotice(
-        Notice(
           "RecyclerView-FastScroll",
-          "Copyright (c) 2016, Tim Malseed",
+          "https://github.com/timusus/RecyclerView-FastScroll",
           "Copyright (c) 2016, Tim Malseed",
           ApacheSoftwareLicense20()
         )
@@ -114,14 +131,6 @@ class AboutActivity : AppCompatActivity() {
           "https://wrdlbrnft.github.io/SortedListAdapter/",
           "Copyright (c) 2017 Wrdlbrnft",
           MITLicense()
-        )
-      )
-      notices.addNotice(
-        Notice(
-          "Termux",
-          "https://termux.com",
-          "Copyright 2016-2017 Fredrik Fornwall",
-          GnuGeneralPublicLicense30()
         )
       )
       LicensesDialog.Builder(this)
@@ -136,7 +145,15 @@ class AboutActivity : AppCompatActivity() {
     }
 
     findViewById<View>(R.id.about_source_code_view).setOnClickListener {
-      openUrl("https://github.com/NeoTerm/NeoTerm")
+      openUrl("https://github.com/9hm2/NeoTerm-pr")
+    }
+
+    findViewById<View>(R.id.about_keyboard_shortcuts_view).setOnClickListener {
+      AlertDialog.Builder(this)
+        .setTitle(R.string.keyboard_shortcuts_title)
+        .setMessage(R.string.keyboard_shortcuts_content)
+        .setPositiveButton(android.R.string.ok, null)
+        .show()
     }
 
     findViewById<View>(R.id.about_reset_app_view).setOnClickListener {

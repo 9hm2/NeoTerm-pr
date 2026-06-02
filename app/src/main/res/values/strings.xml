@@ -150,6 +150,10 @@
   <string name="about_developers_label">Developers &amp; Contributors</string>
   <string name="about_libraries_label">Libraries</string>
   <string name="about_source_label">Source Code</string>
+  <string name="about_description">A proot-based Linux terminal for Android — run a real Ubuntu, Alpine, Kali or Arch userland.</string>
+  <string name="about_keyboard_shortcuts_label">Keyboard shortcuts</string>
+  <string name="keyboard_shortcuts_title">Keyboard shortcuts</string>
+  <string name="keyboard_shortcuts_content">Sessions &amp; tabs\n•  Ctrl+Shift+N — New session\n•  Ctrl+Shift+X — Next session\n•  Ctrl+Shift+Z — Previous session\n•  Alt+1…9 — Switch to session 1–9\n•  Swipe left/right — Switch tabs\n\nView &amp; editing\n•  Ctrl+Shift+V — Paste\n•  Ctrl+Shift+F — Toggle fullscreen\n•  Ctrl+Shift+Plus / Minus — Font size\n•  Pinch — Zoom font size\n•  Long press — Select text\n•  Tap a link — Open in browser\n\nVolume keys (enable in Settings ▸ General)\n•  Volume Down — Ctrl\n•  Volume Up — Fn\n\nFn combos (hold Volume Up)\n•  Fn+W / A / S / D — Arrow keys\n•  Fn+P / Fn+N — Page Up / Page Down\n•  Fn+T — Tab\n•  Fn+I — Insert\n•  Fn+E — Esc\n•  Fn+1…9 / Fn+0 — F1–F10\n•  Fn+H — ~   Fn+U — _   Fn+L — |\n\nOther\n•  Back — Esc (when enabled)\n•  Enter — Close a finished session</string>
   <string name="about_reset_label">Reset App</string>
   <string name="about_reset_label_desc">Clear all files except user home directory</string>
   <string name="support_donate_label">Donate</string>

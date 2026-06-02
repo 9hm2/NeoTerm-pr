@@ -63,6 +63,15 @@
               android:textAppearance="@style/TextAppearance.AppCompat.Headline"/>
           </LinearLayout>
 
+          <TextView
+            android:layout_width="fill_parent"
+            android:layout_height="wrap_content"
+            android:paddingLeft="16dp"
+            android:paddingRight="16dp"
+            android:paddingBottom="8dp"
+            android:text="@string/about_description"
+            android:textAppearance="@style/TextAppearance.AppCompat.Body1"/>
+
           <LinearLayout
             android:id="@+id/about_version_view"
             android:layout_width="fill_parent"
@@ -169,6 +178,36 @@
                 android:textAppearance="@style/TextAppearance.AppCompat.Subhead"/>
 
             </LinearLayout>
+
+          </LinearLayout>
+
+          <LinearLayout
+            android:id="@+id/about_keyboard_shortcuts_view"
+            android:layout_width="fill_parent"
+            android:layout_height="wrap_content"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:minHeight="48dp"
+            android:orientation="horizontal"
+            android:paddingLeft="16dp"
+            android:paddingRight="16dp">
+
+            <ImageView
+              android:layout_width="24dp"
+              android:layout_height="24dp"
+              app:srcCompat="@drawable/ic_info"/>
+
+            <TextView
+              android:layout_width="wrap_content"
+              android:layout_height="wrap_content"
+              android:layout_marginLeft="32dp"
+              android:layout_marginStart="32dp"
+              android:paddingBottom="8dp"
+              android:paddingTop="8dp"
+              android:text="@string/about_keyboard_shortcuts_label"
+              android:textAppearance="@style/TextAppearance.AppCompat.Subhead"/>
 
           </LinearLayout>
 
