@@ -111,8 +111,11 @@ tar -C "$WORK" -xf "$WORK/libtool.tar.gz"
   ./configure --host=aarch64-linux-android --prefix="$PREFIX" \
     --enable-ltdl-install --enable-shared --disable-static \
     CC="$CC" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" CFLAGS="-fPIC"
-  make -C libltdl -j"$(nproc)"
-  make -C libltdl install
+  # libltdl is built from the top-level Makefile (libtool itself is shell, so
+  # the only real compilation here is libltdl). Build + install everything into
+  # the prefix; we only consume libltdl.so + ltdl.h.
+  make -j"$(nproc)"
+  make install
 )
 
 echo "── PulseAudio $PA_VERSION (meson/NDK) ──"
