@@ -160,10 +160,11 @@ meson setup "$WORK/pa-build" "$PA_SRC" \
   -Dsamplerate=disabled -Dsoxr=disabled -Dspeex=disabled -Dsystemd=disabled \
   -Dtcpwrap=disabled -Dudev=disabled -Dx11=disabled -Dbashcompletiondir=no \
   -Dzshcompletiondir=no -Dudevrulesdir=no -Dadrian-aec=true -Dwebrtc-aec=disabled
-# bionic's execinfo.h exists but doesn't declare backtrace() until API 33;
-# meson enabled HAVE_EXECINFO_H from header presence. Drop it so PA uses its
-# no-backtrace fallback.
-sed -i '/define HAVE_EXECINFO_H/d' "$WORK/pa-build/config.h" || true
+# bionic's execinfo.h exists but doesn't declare backtrace() until API 33, and
+# sys/capability.h exists without libcap (cap_t/cap_init). meson enabled both
+# from header presence; drop them so PA uses its fallbacks.
+sed -i '/define HAVE_EXECINFO_H/d;/define HAVE_SYS_CAPABILITY_H/d;/define HAVE_CAPABILITIES/d' \
+  "$WORK/pa-build/config.h" || true
 
 ninja -C "$WORK/pa-build"
 DESTDIR="$WORK/pa-install" ninja -C "$WORK/pa-build" install
