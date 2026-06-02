@@ -102,17 +102,46 @@ tasks.register("prepareX11Sources", Copy) {
   doLast {
     def f = file("$outDir/com/termux/x11/MainActivity.java")
     if (f.exists()) {
+      // Track soft-keyboard visibility field.
+      def fieldAnchor = '    static InputMethodManager inputMethodManager;'
+      if (f.text.contains(fieldAnchor)) {
+        f.text = f.text.replace(fieldAnchor,
+          fieldAnchor + '\n    public static boolean imeWasVisible = false; // NeoTerm')
+      }
+      // onPause: don't hide the keyboard; remember whether it was visible so it
+      // can be restored when returning (e.g. from recents).
       def anchor = '''    public void onPause() {
         inputMethodManager.hideSoftInputFromWindow(getWindow().getDecorView().getRootView().getWindowToken(), 0);'''
       def replacement = '''    public void onPause() {
-        // NeoTerm: keep the soft keyboard state when leaving (e.g. to recents);
-        // upstream hid it here unconditionally.'''
+        // NeoTerm: keep the soft keyboard across recents — remember its state
+        // instead of hiding it unconditionally (upstream hid it here).
+        imeWasVisible = android.os.Build.VERSION.SDK_INT >= 30
+                && getWindow().getDecorView().getRootWindowInsets() != null
+                && getWindow().getDecorView().getRootWindowInsets().isVisible(android.view.WindowInsets.Type.ime());'''
       def text = f.text
       if (text.contains(anchor)) {
         f.text = text.replace(anchor, replacement)
         logger.lifecycle("prepareX11Sources: patched MainActivity.onPause keyboard hide")
       } else {
         logger.warn("prepareX11Sources: onPause anchor not found — MainActivity not patched")
+      }
+      // onWindowFocusChanged: restore the keyboard once when regaining focus.
+      def focusAnchor = '''        ((FrameLayout) findViewById(android.R.id.content)).getChildAt(0).setFitsSystemWindows(!fullscreen);
+    }'''
+      def focusReplacement = '''        ((FrameLayout) findViewById(android.R.id.content)).getChildAt(0).setFitsSystemWindows(!fullscreen);
+
+        // NeoTerm: restore the soft keyboard if it was open before leaving.
+        if (hasFocus && imeWasVisible && inputMethodManager != null) {
+            imeWasVisible = false;
+            getWindow().getDecorView().postDelayed(
+                () -> inputMethodManager.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0), 60);
+        }
+    }'''
+      if (f.text.contains(focusAnchor)) {
+        f.text = f.text.replace(focusAnchor, focusReplacement)
+        logger.lifecycle("prepareX11Sources: patched MainActivity keyboard restore on focus")
+      } else {
+        logger.warn("prepareX11Sources: focus anchor not found — keyboard-restore not patched")
       }
       // Rebrand the X11 notification title (upstream hardcodes "Termux:X11").
       def title = '.setContentTitle("Termux:X11")'
