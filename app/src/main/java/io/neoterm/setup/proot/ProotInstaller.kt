@@ -189,22 +189,39 @@ class ProotInstaller(
           if (outFile.exists()) outFile.delete()
           try {
             Os.link(linkTarget.absolutePath, outFile.absolutePath)
+            // A hardlink osztja a célja inode-ját, így a jogosultságot is.
           } catch (e: Exception) {
-            // Ha a hardlink nem megy (pl. fs nem támogatja), másoljuk.
+            // Ha a hardlink nem megy (pl. fs nem támogatja), másoljuk — és
+            // ilyenkor külön be kell állítani a jogosultságot is.
             linkTarget.copyTo(outFile, overwrite = true)
+            chmodSafe(outFile, entry.mode, isScript(outFile))
           }
         }
 
         entry.isFile -> {
           outFile.parentFile?.mkdirs()
+          var shebang = false
+          var firstChunk = true
           FileOutputStream(outFile).use { out ->
             var read = tar.read(buffer)
             while (read != -1) {
+              if (firstChunk) {
+                // A futtatható scriptek `#!`-gel kezdődnek. Egyes tarball-
+                // bejegyzéseknél / fájlrendszereknél a futtatási bit elveszhet,
+                // ezért a shebanges fájlokat mindig futtathatóvá tesszük — a
+                // proot különben nem tudja exec-elni őket (a bináris ELF-eket
+                // mmap-eli, így azok bit nélkül is futnak, a scriptek viszont
+                // megkövetelik a futtatási bitet → "Permission denied").
+                if (read >= 2 && buffer[0] == '#'.code.toByte() && buffer[1] == '!'.code.toByte()) {
+                  shebang = true
+                }
+                firstChunk = false
+              }
               out.write(buffer, 0, read)
               read = tar.read(buffer)
             }
           }
-          chmodSafe(outFile, entry.mode)
+          chmodSafe(outFile, entry.mode, shebang)
         }
 
         // Device/char/fifo node-ok: nem tudunk mknod-ot root nélkül, és
@@ -266,13 +283,33 @@ class ProotInstaller(
     }
   }
 
-  private fun chmodSafe(file: File, mode: Int) {
-    try {
-      // a tar mode alsó 12 bitje a jogosultság (sticky/setuid/setgid + rwx)
-      Os.chmod(file.absolutePath, mode and 4095 /* 07777 */)
-    } catch (e: Exception) {
-      // best-effort
+  private fun chmodSafe(file: File, mode: Int, forceExecutable: Boolean = false) {
+    // a tar mode alsó 12 bitje a jogosultság (sticky/setuid/setgid + rwx)
+    var perm = mode and 4095 /* 07777 */
+    // A shebanges scripteknek garantáltan futtathatónak (és olvashatónak) kell
+    // lenniük, különben a proot "Permission denied"-del száll el rajtuk.
+    if (forceExecutable) {
+      perm = perm or 493 /* 0755: rwxr-xr-x bitek */
     }
+    try {
+      Os.chmod(file.absolutePath, perm)
+      return
+    } catch (e: Exception) {
+      NLog.e("ProotInstaller", "Os.chmod failed for ${file.absolutePath}: ${e.message}")
+    }
+    // Tartalék: ha az Os.chmod nem érhető el / megtagadták, a java.io.File API.
+    runCatching {
+      file.setReadable((perm and 256) != 0 /* 0400 */, false)
+      file.setWritable((perm and 128) != 0 /* 0200 */, true)
+      file.setExecutable((perm and 64) != 0 /* 0100 */, false)
+    }
+  }
+
+  /** Igaz, ha a fájl shebanggel (`#!`) kezdődik, azaz futtatható script. */
+  private fun isScript(file: File): Boolean {
+    return runCatching {
+      file.inputStream().use { it.read() == '#'.code && it.read() == '!'.code }
+    }.getOrDefault(false)
   }
 
   private fun deleteRecursively(file: File) {
