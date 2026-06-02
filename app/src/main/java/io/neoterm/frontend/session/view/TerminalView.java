@@ -5,10 +5,12 @@ import android.annotation.TargetApi;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Canvas;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.BitmapDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.text.Editable;
 import android.text.InputType;
@@ -25,10 +27,20 @@ import io.neoterm.R;
 import io.neoterm.backend.*;
 import io.neoterm.component.completion.OnAutoCompleteListener;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 /**
  * View displaying and interacting with a {@link TerminalSession}.
  */
 public final class TerminalView extends View {
+
+  /** Matches http(s)/ftp and bare www. URLs in terminal text. */
+  private static final Pattern URL_PATTERN = Pattern.compile(
+    "(?:(?:https?|ftp)://|www\\.)[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=%]+",
+    Pattern.CASE_INSENSITIVE);
+
+  private static final String URL_TRAILING_PUNCTUATION = ".,;:!?)]}'\"";
 
   /**
    * Log view key and IME events.
@@ -176,6 +188,11 @@ public final class TerminalView extends View {
         if (mEmulator == null) return true;
         if (mIsSelectingText) {
           toggleSelectingText(null);
+          return true;
+        }
+        // Tapping a URL opens it in the browser instead of raising the keyboard.
+        if (!mEmulator.isMouseTrackingActive() && !e.isFromSource(InputDevice.SOURCE_MOUSE)
+          && openUrlAtTap(e)) {
           return true;
         }
         requestFocus();
@@ -849,6 +866,68 @@ public final class TerminalView extends View {
   private void stopSelectionAutoScroll() {
     mSelectionAutoScrollRows = 0;
     removeCallbacks(mSelectionAutoScrollRunnable);
+  }
+
+  /**
+   * If the single tap landed on a URL in the terminal text, open it in the
+   * browser. Rows joined by line-wrap are treated as one logical line so URLs
+   * that wrap across the screen width are still detected.
+   *
+   * @return true if a URL was found and opened.
+   */
+  private boolean openUrlAtTap(MotionEvent e) {
+    if (mEmulator == null) return false;
+    TerminalBuffer screen = mEmulator.getScreen();
+    int columns = mEmulator.mColumns;
+    int col = (int) (e.getX() / mRenderer.mFontWidth);
+    int tapRow = (int) (e.getY() / mRenderer.mFontLineSpacing) + mTopRow;
+
+    int minRow = -screen.getActiveTranscriptRows();
+    int maxRow = mEmulator.mRows - 1;
+    if (tapRow < minRow || tapRow > maxRow) return false;
+
+    int startRow = tapRow;
+    while (startRow > minRow && screen.getLineWrap(startRow - 1)) startRow--;
+    int endRow = tapRow;
+    while (endRow < maxRow && screen.getLineWrap(endRow)) endRow++;
+
+    StringBuilder builder = new StringBuilder();
+    int tapIndex = -1;
+    for (int row = startRow; row <= endRow; row++) {
+      String rowText = screen.getSelectedText(0, row, columns - 1, row);
+      if (rowText == null) rowText = "";
+      if (row == tapRow) tapIndex = builder.length() + Math.min(col, rowText.length());
+      builder.append(rowText);
+    }
+    if (tapIndex < 0) return false;
+
+    Matcher matcher = URL_PATTERN.matcher(builder);
+    while (matcher.find()) {
+      if (tapIndex >= matcher.start() && tapIndex < matcher.end()) {
+        String url = trimUrl(matcher.group());
+        if (url.isEmpty()) return false;
+        if (url.regionMatches(true, 0, "www.", 0, 4)) url = "http://" + url;
+        openUrl(url);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private String trimUrl(String url) {
+    int end = url.length();
+    while (end > 0 && URL_TRAILING_PUNCTUATION.indexOf(url.charAt(end - 1)) >= 0) end--;
+    return url.substring(0, end);
+  }
+
+  private void openUrl(String url) {
+    try {
+      Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+      getContext().startActivity(intent);
+    } catch (Exception e) {
+      Log.w(EmulatorDebug.LOG_TAG, "Could not open URL: " + url, e);
+    }
   }
 
   public void pasteFromClipboard() {
