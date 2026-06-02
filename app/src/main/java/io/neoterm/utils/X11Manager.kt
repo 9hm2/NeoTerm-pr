@@ -2,6 +2,10 @@ package io.neoterm.utils
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.system.ErrnoException
+import android.system.Os
+import java.io.File
 
 /**
  * Drives the embedded Termux:X11 native X server, which is built directly into
@@ -49,15 +53,25 @@ object X11Manager {
   fun startServer(context: Context) {
     runCatching {
       val apk = context.applicationInfo.sourceDir
+      // CmdEntryPoint runs in this separate app_process (not the GUI process),
+      // so it can't rely on the already-loaded libXlorie.so. It resolves the
+      // native lib with getResource("lib/<abi>/libXlorie.so") + System.load(),
+      // which needs the resource to be a REAL file. Our APK uses
+      // extractNativeLibs=true (proot needs nativeLibraryDir), so the lib is on
+      // disk — we expose it through a tiny classpath dir laid out as
+      // lib/<abi>/libXlorie.so and put it first on the classpath.
+      val libClasspath = buildNativeLibClasspath(context)
+      val classpath = if (libClasspath != null) "$libClasspath:$apk" else apk
+
       val builder = ProcessBuilder(
         "/system/bin/app_process",
-        "-Djava.class.path=$apk",
+        "-Djava.class.path=$classpath",
         "/system/bin",
         CMD_ENTRY,
         ":0"
       )
       val env = builder.environment()
-      env["CLASSPATH"] = apk
+      env["CLASSPATH"] = classpath
       env["TERMUX_X11_OVERRIDE_PACKAGE"] = context.packageName
       // app_process must not inherit a proot/distro LD_* environment.
       env.remove("LD_LIBRARY_PATH")
@@ -68,5 +82,31 @@ object X11Manager {
       NLog.e("X11Manager", "Failed to start X server: ${it.localizedMessage}")
     }
     launchDisplay(context)
+  }
+
+  /**
+   * Build a classpath entry directory `…/x11/classpath` containing
+   * `lib/<abi>/libXlorie.so` symlinked to the extracted native lib, so
+   * CmdEntryPoint's getResource() lookup resolves to a loadable file path.
+   * Returns the dir, or null if the lib can't be located.
+   */
+  private fun buildNativeLibClasspath(context: Context): String? {
+    val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return null
+    val nativeLib = File(context.applicationInfo.nativeLibraryDir, "libXlorie.so")
+    if (!nativeLib.exists()) return null
+
+    val root = File(context.filesDir, "x11/classpath")
+    val abiDir = File(root, "lib/$abi").apply { mkdirs() }
+    val link = File(abiDir, "libXlorie.so")
+    if (link.exists()) link.delete()
+    return try {
+      Os.symlink(nativeLib.absolutePath, link.absolutePath)
+      root.absolutePath
+    } catch (e: ErrnoException) {
+      // Fall back to a plain copy if symlinks aren't permitted here.
+      runCatching { nativeLib.copyTo(link, overwrite = true) }
+        .map { root.absolutePath }
+        .getOrNull()
+    }
   }
 }
