@@ -63,6 +63,12 @@ object X11Manager {
       val libClasspath = buildNativeLibClasspath(context)
       val classpath = if (libClasspath != null) "$libClasspath:$apk" else apk
 
+      // Capture the X server's stdout/stderr so failures (e.g. a libXlorie.so
+      // load error that exits the process) are diagnosable: cat this file.
+      val logFile = File(context.filesDir, "x11/server.log").apply {
+        parentFile?.mkdirs()
+      }
+
       val builder = ProcessBuilder(
         "/system/bin/app_process",
         "-Djava.class.path=$classpath",
@@ -77,7 +83,18 @@ object X11Manager {
       env.remove("LD_LIBRARY_PATH")
       env.remove("LD_PRELOAD")
       builder.redirectErrorStream(true)
-      builder.start()
+      builder.redirectOutput(ProcessBuilder.Redirect.to(logFile))
+
+      NLog.e("X11Manager", "Starting X server: CLASSPATH=$classpath")
+      val proc = builder.start()
+
+      // Watch for an early exit (a healthy server blocks in Looper.loop()).
+      Thread {
+        val code = runCatching { proc.waitFor() }.getOrDefault(-1)
+        val msg = "X server process exited with code $code"
+        NLog.e("X11Manager", msg)
+        runCatching { logFile.appendText("\n[X11Manager] $msg\n") }
+      }.apply { isDaemon = true }.start()
     }.onFailure {
       NLog.e("X11Manager", "Failed to start X server: ${it.localizedMessage}")
     }
