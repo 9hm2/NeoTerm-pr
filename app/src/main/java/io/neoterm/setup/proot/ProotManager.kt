@@ -194,6 +194,13 @@ object ProotManager {
     // H.264), so disable that too. (Chromium needs --no-sandbox on the cmdline.)
     args.add("MOZ_DISABLE_CONTENT_SANDBOX=1")
     args.add("MOZ_DISABLE_RDD_SANDBOX=1")
+    // Chromium's sandbox can't work under proot — Debian/Kali's launcher honors
+    // CHROMIUM_FLAGS, so it runs without needing --no-sandbox by hand.
+    args.add("CHROMIUM_FLAGS=--no-sandbox --disable-gpu")
+    // No xdg-desktop-portal in the container; without this many GTK apps stall
+    // or crash trying to reach it.
+    args.add("GTK_USE_PORTAL=0")
+    args.add("NO_AT_BRIDGE=1")
     extraEnv.forEach { if (it.isNotEmpty()) args.add(it) }
 
     // A guest shell + login-kapcsoló(k), vagy egy konkrét parancs `sh -c`-vel.
