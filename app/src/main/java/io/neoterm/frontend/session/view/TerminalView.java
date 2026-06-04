@@ -382,12 +382,18 @@ public final class TerminalView extends View {
     // shade — including its accent — from these two so it deviates minimally
     // from the terminal's own palette. Keys are namespaced under the keyboard's
     // package and are simply ignored by any other IME.
-    if (mEmulator != null) {
-      int[] colors = mEmulator.mColors.mCurrentColors;
-      if (outAttrs.extras == null) outAttrs.extras = new Bundle();
-      outAttrs.extras.putInt(IME_THEME_BACKGROUND, colors[TextStyle.COLOR_INDEX_BACKGROUND]);
-      outAttrs.extras.putInt(IME_THEME_FOREGROUND, colors[TextStyle.COLOR_INDEX_FOREGROUND]);
-    }
+    //
+    // Fall back to the configured default color scheme when the emulator has
+    // not attached yet: the keyboard can be shown for the very first input
+    // session before the session is ready, and without this the colors would
+    // only reach the keyboard after the input connection is recreated (e.g.
+    // after a recents round-trip).
+    int[] colors = mEmulator != null
+      ? mEmulator.mColors.mCurrentColors
+      : TerminalColors.COLOR_SCHEME.mDefaultColors;
+    if (outAttrs.extras == null) outAttrs.extras = new Bundle();
+    outAttrs.extras.putInt(IME_THEME_BACKGROUND, colors[TextStyle.COLOR_INDEX_BACKGROUND]);
+    outAttrs.extras.putInt(IME_THEME_FOREGROUND, colors[TextStyle.COLOR_INDEX_FOREGROUND]);
 
     return new BaseInputConnection(this, true) {
       @Override
