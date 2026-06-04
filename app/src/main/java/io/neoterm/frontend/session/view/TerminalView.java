@@ -966,9 +966,11 @@ public final class TerminalView extends View {
     }
 
     int startRow = tapRow;
-    while (startRow > minRow && screen.getLineWrap(startRow - 1)) startRow--;
+    for (int n = 0; n < TerminalUrls.MAX_WRAP_ROWS && startRow > minRow
+      && TerminalUrls.isContinued(screen, startRow - 1, columns); n++) startRow--;
     int endRow = tapRow;
-    while (endRow < maxRow && screen.getLineWrap(endRow)) endRow++;
+    for (int n = 0; n < TerminalUrls.MAX_WRAP_ROWS && endRow < maxRow
+      && TerminalUrls.isContinued(screen, endRow, columns); n++) endRow++;
 
     StringBuilder builder = new StringBuilder();
     int tapIndex = -1;

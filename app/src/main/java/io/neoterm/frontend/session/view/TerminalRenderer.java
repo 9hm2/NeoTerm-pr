@@ -183,9 +183,11 @@ final class TerminalRenderer {
     int row = topRow;
     while (row < endRow) {
       int startRow = row;
-      while (startRow > minRow && screen.getLineWrap(startRow - 1)) startRow--;
+      for (int n = 0; n < TerminalUrls.MAX_WRAP_ROWS && startRow > minRow
+        && TerminalUrls.isContinued(screen, startRow - 1, columns); n++) startRow--;
       int logicalEnd = row;
-      while (logicalEnd < maxRow && screen.getLineWrap(logicalEnd)) logicalEnd++;
+      for (int n = 0; n < TerminalUrls.MAX_WRAP_ROWS && logicalEnd < maxRow
+        && TerminalUrls.isContinued(screen, logicalEnd, columns); n++) logicalEnd++;
 
       StringBuilder builder = new StringBuilder((logicalEnd - startRow + 1) * columns);
       for (int r = startRow; r <= logicalEnd; r++) {
