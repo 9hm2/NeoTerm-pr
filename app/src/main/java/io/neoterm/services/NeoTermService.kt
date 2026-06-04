@@ -71,6 +71,7 @@ class NeoTermService : Service() {
     val action = intent.action
     when (action) {
       ACTION_SERVICE_STOP -> {
+        NLog.e("NeoTermSvcDbg", "ACTION_SERVICE_STOP: term=${mTerminalSessions.size} x=${mXSessions.size}")
         for (i in mTerminalSessions.indices)
           mTerminalSessions[i].finishIfRunning()
         teardownAndStop()
@@ -89,6 +90,7 @@ class NeoTermService : Service() {
   }
 
   override fun onDestroy() {
+    NLog.e("NeoTermSvcDbg", "onDestroy")
     stopForeground(true)
     stopX11Server()
     io.neoterm.utils.PulseAudioBridge.stop()
@@ -172,6 +174,10 @@ class NeoTermService : Service() {
    * doesn't linger (or get re-spawned) with zero sessions.
    */
   private fun stopSelfIfNoSessions() {
+    NLog.e(
+      "NeoTermSvcDbg",
+      "stopSelfIfNoSessions: term=${mTerminalSessions.size} x=${mXSessions.size}"
+    )
     if (mTerminalSessions.isEmpty() && mXSessions.isEmpty()) {
       teardownAndStop()
     }
@@ -184,9 +190,12 @@ class NeoTermService : Service() {
    * X11 server process.
    */
   private fun teardownAndStop() {
-    NeoTermActivity.getInstance()?.finishAndRemoveTask()
+    val activity = NeoTermActivity.getInstance()
+    NLog.e("NeoTermSvcDbg", "teardownAndStop: activityInstance=${activity != null}")
+    activity?.finishAndRemoveTask()
     stopForeground(true)
     stopSelf()
+    NLog.e("NeoTermSvcDbg", "teardownAndStop: stopSelf() called")
   }
 
   private fun createOrFindSession(parameter: ShellParameter): TerminalSession {
