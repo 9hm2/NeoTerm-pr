@@ -1,12 +1,8 @@
 package io.neoterm.ui.pm
 
-import android.annotation.SuppressLint
 import android.os.Bundle
-import android.view.LayoutInflater
 import android.view.Menu
 import android.view.MenuItem
-import android.widget.EditText
-import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -17,7 +13,6 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.github.wrdlbrnft.sortedlistadapter.SortedListAdapter
 import io.neoterm.R
 import io.neoterm.component.ComponentManager
-import io.neoterm.component.config.NeoPreference
 import io.neoterm.component.pm.*
 import io.neoterm.setup.proot.PackageAction
 import io.neoterm.utils.StringDistance
@@ -93,77 +88,11 @@ class PackageManagerActivity : AppCompatActivity(), SearchView.OnQueryTextListen
   override fun onOptionsItemSelected(item: MenuItem): Boolean {
     when (item.itemId) {
       android.R.id.home -> finish()
-      R.id.action_source -> changeSource()
       R.id.action_update_and_refresh -> executeAptUpdate()
       R.id.action_refresh -> refreshPackageList()
       R.id.action_upgrade -> executeAptUpgrade()
     }
     return super.onOptionsItemSelected(item)
-  }
-
-  private fun changeSource() {
-    val sourceManager = ComponentManager.getComponent<PackageComponent>().sourceManager
-    val sourceList = sourceManager.getAllSources()
-
-    val items = sourceList.map { "${it.url} :: ${it.repo}" }.toTypedArray()
-    val selection = sourceList.map { it.enabled }.toBooleanArray()
-    AlertDialog.Builder(this)
-      .setTitle(R.string.pref_package_source)
-      .setMultiChoiceItems(items, selection) { _, which, isChecked ->
-        sourceList[which].enabled = isChecked
-      }
-      .setPositiveButton(android.R.string.yes) { _, _ -> changeSourceInternal(sourceManager, sourceList) }
-      .setNeutralButton(R.string.new_source) { _, _ -> changeSourceToUserInput(sourceManager) }
-      .setNegativeButton(android.R.string.no, null)
-      .show()
-  }
-
-  @SuppressLint("SetTextI18n")
-  private fun changeSourceToUserInput(sourceManager: SourceManager) {
-    val view = LayoutInflater.from(this).inflate(R.layout.dialog_edit_two_text, null, false)
-    view.findViewById<TextView>(R.id.dialog_edit_text_info).text = getString(R.string.input_new_source_url)
-    view.findViewById<TextView>(R.id.dialog_edit_text2_info).text = getString(R.string.input_new_source_repo)
-
-    val urlEditor = view.findViewById<EditText>(R.id.dialog_edit_text_editor)
-    val repoEditor = view.findViewById<EditText>(R.id.dialog_edit_text2_editor)
-    repoEditor.setText("stable main")
-
-    AlertDialog.Builder(this)
-      .setTitle(R.string.pref_package_source)
-      .setView(view)
-      .setNegativeButton(android.R.string.no, null)
-      .setPositiveButton(android.R.string.yes) { _, _ ->
-        val url = urlEditor.text.toString()
-        val repo = repoEditor.text.toString()
-        var errored = false
-        if (url.trim().isEmpty()) {
-          urlEditor.error = getString(R.string.error_new_source_url)
-          errored = true
-        }
-        if (repo.trim().isEmpty()) {
-          repoEditor.error = getString(R.string.error_new_source_repo)
-          errored = true
-        }
-        if (errored) {
-          return@setPositiveButton
-        }
-        val source = urlEditor.text.toString()
-        sourceManager.addSource(source, repo, true)
-        postChangeSource(sourceManager)
-      }
-      .show()
-  }
-
-  private fun changeSourceInternal(sourceManager: SourceManager, source: List<Source>) {
-    sourceManager.updateAll(source)
-    postChangeSource(sourceManager)
-  }
-
-  private fun postChangeSource(sourceManager: SourceManager) {
-    sourceManager.applyChanges()
-    NeoPreference.store(R.string.key_package_source, sourceManager.getMainPackageSource())
-    SourceHelper.syncSource(sourceManager)
-    executeAptUpdate()
   }
 
   private fun executeAptUpdate() = runPackageManager(PackageAction.UPDATE) {

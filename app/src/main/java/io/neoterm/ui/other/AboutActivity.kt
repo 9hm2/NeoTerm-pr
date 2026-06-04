@@ -13,6 +13,7 @@ import de.psdev.licensesdialog.LicensesDialog
 import de.psdev.licensesdialog.licenses.ApacheSoftwareLicense20
 import de.psdev.licensesdialog.licenses.GnuGeneralPublicLicense20
 import de.psdev.licensesdialog.licenses.GnuGeneralPublicLicense30
+import de.psdev.licensesdialog.licenses.GnuLesserGeneralPublicLicense21
 import de.psdev.licensesdialog.licenses.MITLicense
 import de.psdev.licensesdialog.model.Notice
 import de.psdev.licensesdialog.model.Notices
@@ -85,6 +86,38 @@ class AboutActivity : AppCompatActivity() {
           "https://termux.com",
           "Copyright 2016-2024 Fredrik Fornwall",
           GnuGeneralPublicLicense30()
+        )
+      )
+      notices.addNotice(
+        Notice(
+          "Termux:X11",
+          "https://github.com/termux/termux-x11",
+          "Copyright (C) 2022-2024 Termux",
+          GnuGeneralPublicLicense30()
+        )
+      )
+      notices.addNotice(
+        Notice(
+          "PulseAudio",
+          "https://www.freedesktop.org/wiki/Software/PulseAudio/",
+          "Copyright 2004-2024 Lennart Poettering and PulseAudio contributors",
+          GnuLesserGeneralPublicLicense21()
+        )
+      )
+      notices.addNotice(
+        Notice(
+          "libsndfile",
+          "https://libsndfile.github.io/libsndfile/",
+          "Copyright (C) 1999-2024 Erik de Castro Lopo",
+          GnuLesserGeneralPublicLicense21()
+        )
+      )
+      notices.addNotice(
+        Notice(
+          "GNU Libtool (libltdl)",
+          "https://www.gnu.org/software/libtool/",
+          "Copyright (C) 1996-2019 Free Software Foundation, Inc.",
+          GnuLesserGeneralPublicLicense21()
         )
       )
       notices.addNotice(
