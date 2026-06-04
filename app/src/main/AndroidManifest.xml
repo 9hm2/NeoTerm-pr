@@ -7,6 +7,11 @@
   <uses-feature
     android:name="android.software.leanback"
     android:required="false"/>
+  <!-- USB host: detected/permissioned via a runtime BroadcastReceiver
+       (UsbBridge), not a manifest device_filter. -->
+  <uses-feature
+    android:name="android.hardware.usb.host"
+    android:required="false"/>
 
   <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-permission android:name="android.permission.INTERNET"/>

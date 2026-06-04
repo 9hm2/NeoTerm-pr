@@ -69,6 +69,9 @@ class NeoTermService : Service() {
     // Start the Android-side PulseAudio with the app, so terminal apps (not just
     // X11) can play audio via PULSE_SERVER=127.0.0.1:4713.
     io.neoterm.utils.PulseAudioBridge.start(this)
+    // USB host: detect plug-in/out and request permission via a BroadcastReceiver
+    // (no manifest device_filter), publishing granted devices to the distro.
+    io.neoterm.utils.UsbBridge.register(this)
   }
 
   override fun onBind(intent: Intent): IBinder? {
@@ -103,6 +106,7 @@ class NeoTermService : Service() {
     }
     stopX11Server()
     io.neoterm.utils.PulseAudioBridge.stop()
+    io.neoterm.utils.UsbBridge.unregister(this)
 
     for (i in mTerminalSessions.indices)
       mTerminalSessions[i].finishIfRunning()
