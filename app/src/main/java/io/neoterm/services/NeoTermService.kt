@@ -90,6 +90,9 @@ class NeoTermService : Service() {
 
   override fun onDestroy() {
     stopForeground(true)
+    runCatching {
+      (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIFICATION_ID)
+    }
     stopX11Server()
     io.neoterm.utils.PulseAudioBridge.stop()
 
@@ -191,6 +194,14 @@ class NeoTermService : Service() {
     // notification.
     runCatching { com.termux.x11.MainActivity.getInstance()?.finishAndRemoveTask() }
     stopForeground(true)
+    // Explicitly cancel the notification: updateNotification() (called from
+    // removeTermSession just before teardown) re-posts it via
+    // NotificationManager.notify(), which detaches it from the foreground
+    // lifecycle, so stopForeground(true) alone leaves the 0-session notification
+    // stuck on screen after the service is already dead.
+    runCatching {
+      (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIFICATION_ID)
+    }
     stopSelf()
   }
 
