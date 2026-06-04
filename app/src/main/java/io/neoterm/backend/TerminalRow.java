@@ -35,6 +35,12 @@ public final class TerminalRow {
    * If this row might contain chars with width != 1, used for deactivating fast path
    */
   boolean mHasNonOneWidthOrSurrogateChars;
+  /**
+   * OSC 8 hyperlink target per column, or null. Lazily allocated: stays null for
+   * the (vast majority of) rows that contain no hyperlinks, so it costs nothing
+   * for normal output.
+   */
+  private String[] mHyperlink;
 
   /**
    * Construct a blank row (containing only whitespace, ' ') with a specified style.
@@ -71,6 +77,10 @@ public final class TerminalRow {
         latestNonCombiningWidth = w;
       }
       setChar(destinationX, codePoint, line.getStyle(sourceX1));
+      // setChar cleared the destination link; carry over the source's, if any
+      // (so OSC 8 hyperlinks survive scrolling/insert).
+      String link = line.getHyperlink(sourceX1);
+      if (link != null) setHyperlink(destinationX, link);
     }
   }
 
@@ -138,11 +148,31 @@ public final class TerminalRow {
     Arrays.fill(mStyle, style);
     mSpaceUsed = (short) mColumns;
     mHasNonOneWidthOrSurrogateChars = false;
+    mHyperlink = null;
+  }
+
+  /** OSC 8 hyperlink target at the given column, or null. */
+  public String getHyperlink(int column) {
+    return (mHyperlink == null || column < 0 || column >= mColumns) ? null : mHyperlink[column];
+  }
+
+  /** Set (or clear, when uri is null) the OSC 8 hyperlink at the given column. */
+  public void setHyperlink(int column, String uri) {
+    if (column < 0 || column >= mColumns) return;
+    if (uri == null) {
+      if (mHyperlink != null) mHyperlink[column] = null;
+      return;
+    }
+    if (mHyperlink == null) mHyperlink = new String[mColumns];
+    mHyperlink[column] = uri;
   }
 
   // https://github.com/steven676/Android-Terminal-Emulator/commit/9a47042620bec87617f0b4f5d50568535668fe26
   public void setChar(int columnToSet, int codePoint, long style) {
     mStyle[columnToSet] = style;
+    // Overwriting a cell drops any hyperlink it carried; the emulator re-applies
+    // the active OSC 8 link (if any) right after writing the character.
+    if (mHyperlink != null) mHyperlink[columnToSet] = null;
 
     final int newCodePointDisplayWidth = WcWidth.width(codePoint);
 

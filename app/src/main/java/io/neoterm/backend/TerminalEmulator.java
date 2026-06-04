@@ -305,6 +305,9 @@ public final class TerminalEmulator {
    */
   private int mEffect;
 
+  /** The currently-open OSC 8 hyperlink target (applied to written cells), or null. */
+  private String mCurrentHyperlink;
+
   /**
    * The number of scrolled lines since last calling {@link #clearScrollCounter()}. Used for moving selection up along
    * with the scrolling text.
@@ -2010,6 +2013,14 @@ public final class TerminalEmulator {
           }
         }
         break;
+      case 8: {
+        // OSC 8 hyperlink: "8 ; params ; URI". An empty URI closes the link.
+        // textParameter is everything after "8;", i.e. "params;URI".
+        int sep = textParameter.indexOf(';');
+        String uri = (sep >= 0) ? textParameter.substring(sep + 1) : "";
+        mCurrentHyperlink = uri.isEmpty() ? null : uri;
+        break;
+      }
       case 52: // Manipulate Selection Data. Skip the optional first selection parameter(s).
         int startIndex = textParameter.indexOf(";") + 1;
         try {
@@ -2364,7 +2375,12 @@ public final class TerminalEmulator {
     }
 
     int offsetDueToCombiningChar = ((displayWidth <= 0 && mCursorCol > 0 && !mAboutToAutoWrap) ? 1 : 0);
-    mScreen.setChar(mCursorCol - offsetDueToCombiningChar, mCursorRow, codePoint, getStyle());
+    int writeColumn = mCursorCol - offsetDueToCombiningChar;
+    mScreen.setChar(writeColumn, mCursorRow, codePoint, getStyle());
+    // Carry the active OSC 8 hyperlink onto the written cell (setChar cleared it).
+    if (mCurrentHyperlink != null) {
+      mScreen.setHyperlink(writeColumn, mCursorRow, mCurrentHyperlink);
+    }
 
     if (autoWrap && displayWidth > 0)
       mAboutToAutoWrap = (mCursorCol == mRightMargin - displayWidth);
@@ -2414,6 +2430,7 @@ public final class TerminalEmulator {
     mArgIndex = 0;
     mContinueSequence = false;
     mEscapeState = ESC_NONE;
+    mCurrentHyperlink = null;
     mInsertMode = false;
     mTopMargin = mLeftMargin = 0;
     mBottomMargin = mRows;

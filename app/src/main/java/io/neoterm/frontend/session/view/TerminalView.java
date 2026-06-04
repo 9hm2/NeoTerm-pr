@@ -956,6 +956,15 @@ public final class TerminalView extends View {
     int maxRow = mEmulator.mRows - 1;
     if (tapRow < minRow || tapRow > maxRow) return false;
 
+    // An OSC 8 hyperlink on the tapped cell wins: the real target lives in the
+    // escape sequence (e.g. a short "Sign in" label hiding a long URL), so the
+    // plain-text regex below can't find it.
+    String hyperlink = screen.getHyperlinkAt(tapRow, Math.min(col, columns - 1));
+    if (hyperlink != null) {
+      showTokenActions(new TerminalTokens.Token(TerminalTokens.Type.URL, hyperlink));
+      return true;
+    }
+
     int startRow = tapRow;
     while (startRow > minRow && screen.getLineWrap(startRow - 1)) startRow--;
     int endRow = tapRow;
