@@ -53,6 +53,7 @@ helper = r'''
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdint.h>
 #include <stddef.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -89,6 +90,39 @@ static int neoterm_usb_fd(const char *path)
 	}
 	close(s);
 	return fd;
+}
+
+/* Enumerate from NeoTerm's device LIST instead of sysfs/usbfs (both are EACCES
+ * for the app uid under Android proot). Each line is "/dev/bus/usb/BBB/DDD ...".
+ * Descriptors are then read from the device fd (get_usbfs_fd -> NeoTerm fd). */
+static int neoterm_scan_devices(struct libusb_context *ctx)
+{
+	int s = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (s < 0)
+		return LIBUSB_SUCCESS;
+	struct sockaddr_un a;
+	memset(&a, 0, sizeof a);
+	a.sun_family = AF_UNIX;
+	static const char nm[] = "io.neoterm.usb";
+	a.sun_path[0] = '\0';
+	memcpy(a.sun_path + 1, nm, sizeof(nm) - 1);
+	socklen_t L = offsetof(struct sockaddr_un, sun_path) + 1 + (sizeof(nm) - 1);
+	if (connect(s, (struct sockaddr *)&a, L) < 0) { close(s); return LIBUSB_SUCCESS; }
+	if (write(s, "LIST\n", 5) != 5) { close(s); return LIBUSB_SUCCESS; }
+	char buf[8192];
+	size_t off = 0;
+	ssize_t n;
+	while (off < sizeof(buf) - 1 && (n = read(s, buf + off, sizeof(buf) - 1 - off)) > 0)
+		off += (size_t)n;
+	close(s);
+	buf[off] = '\0';
+	char *save = NULL;
+	for (char *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+		unsigned bus, dev;
+		if (sscanf(line, "/dev/bus/usb/%u/%u", &bus, &dev) == 2)
+			(void)linux_enumerate_device(ctx, (uint8_t)bus, (uint8_t)dev, NULL);
+	}
+	return LIBUSB_SUCCESS;
 }
 /* === end NeoTerm === */
 '''
@@ -143,6 +177,19 @@ s2 = re.sub(
     s, count=1)
 if s2 == s:
     print("anchor for get_usbfs_fd patch not found", file=sys.stderr); sys.exit(4)
+s = s2
+
+# --- 3) enumerate via the NeoTerm socket (sysfs + /dev/bus/usb dir are EACCES) ---
+s2 = re.sub(
+    r'\tif \(sysfs_available\)\n'
+    r'\t\treturn sysfs_get_device_list\(ctx\);\n'
+    r'\telse\n'
+    r'\t\treturn usbfs_get_device_list\(ctx\);',
+    '\t(void)sysfs_get_device_list; (void)usbfs_get_device_list;\n'
+    '\treturn neoterm_scan_devices(ctx);',
+    s, count=1)
+if s2 == s:
+    print("anchor for scan_devices patch not found", file=sys.stderr); sys.exit(7)
 s = s2
 
 open(p, 'w').write(s)
