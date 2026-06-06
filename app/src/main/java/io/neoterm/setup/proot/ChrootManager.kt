@@ -82,6 +82,10 @@ object ChrootManager {
       if (ext.isNotEmpty()) {
         append("if [ -d ").append(sq(ext)).append(" ]; then mkdir -p \"\$R/sdcard\" 2>/dev/null; grep -q \" \$R/sdcard \" /proc/mounts 2>/dev/null || mount -o bind ").append(sq(ext)).append(" \"\$R/sdcard\" 2>/dev/null; fi\n")
       }
+      // We are already root with direct kernel access, so let apt download as root
+      // instead of dropping to the _apt user (which can't traverse the chroot and
+      // prints a harmless "Permission denied … unsandboxed as root" warning).
+      append("if [ -d \"\$R/etc/apt/apt.conf.d\" ] && [ ! -e \"\$R/etc/apt/apt.conf.d/99neoterm\" ]; then printf 'APT::Sandbox::User \"root\";\\n' > \"\$R/etc/apt/apt.conf.d/99neoterm\" 2>/dev/null; fi\n")
       // Guest environment (no PULSE_* — audio is direct in chroot).
       append("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n")
       append("export TERM=xterm-256color HOME=/root TMPDIR=/tmp USER=root LOGNAME=root\n")
