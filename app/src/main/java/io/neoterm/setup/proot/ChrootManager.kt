@@ -7,22 +7,22 @@ import java.io.File
 /**
  * Real-root **chroot** runtime, offered instead of proot on rooted devices.
  *
- * Unlike proot (ptrace fake-chroot, no kernel privileges), chroot has true root
- * and kernel access, so the distro talks to hardware directly: ALSA at /dev/snd,
- * USB at /dev/bus/usb, etc. Therefore the Android-side bridges (PulseAudio over
- * AAudio, the mic source, the USB fd socket) are deliberately NOT used in this
- * mode — see NeoTermService — and PULSE_SERVER/PULSE_SOURCE are not exported.
+ * Modeled on Kali NetHunter Terminal's launcher: a normal Android shell
+ * (/system/bin/sh) runs on the PTY (so it's a session leader with a controlling
+ * terminal), detects the su flavor, and runs the chroot in the GLOBAL mount
+ * namespace (Magisk `-mm` / KernelSU `-M -p`). Inside the chroot we exec the
+ * distro's own `/bin/su`, which sets up a proper login session + controlling
+ * terminal — so job control works (Ctrl+C/Ctrl+Z/fg/bg). The mounts + chroot
+ * live in a small root script file to avoid nested-quoting hell.
  *
- * The whole thing runs as one `su -c "<script>"`: bind-mount /dev /proc /sys
- * (+ a tmpfs /dev/shm and the X11 socket dir), then `chroot` into the rootfs and
- * exec the login shell. Reuses [ProotManager.Launch] so the session/native exec
- * path is unchanged.
+ * Real kernel access means audio/USB go straight to the device, so the
+ * Android-side bridges (PulseAudio/AAudio, mic, USB socket) are NOT used here
+ * (see NeoTermService) and PULSE_* is not exported.
  *
  * @author kiva
  */
 object ChrootManager {
 
-  /** True when chroot is selected AND the device actually has `su`. */
   fun isUsable(): Boolean = RootUtils.isRooted()
 
   fun buildLaunch(
@@ -33,63 +33,73 @@ object ChrootManager {
     command: List<String> = emptyList()
   ): ProotManager.Launch {
     val rootfs = distro.rootfsPath()
-    val shell = loginShell ?: distro.defaultShell
-    val su = RootUtils.suPath() ?: "su"
-
+    val lang = ProotManager.guestLang(distro)
     val x11Sock = "${NeoTermPath.PROOT_ROOT_PATH}/x11/.X11-unix"
     File(x11Sock).apply { mkdirs() }
+    val ext = System.getenv("EXTERNAL_STORAGE") ?: ""
 
-    // Guest environment (clean slate via `env -i`). Note: no PULSE_* — audio in
-    // chroot goes straight to the kernel (e.g. ALSA), not through the app.
-    val envTokens = ArrayList<String>()
-    envTokens.add("HOME=/root")
-    envTokens.add("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-    envTokens.add("TERM=xterm-256color")
-    envTokens.add("COLORTERM=truecolor")
-    envTokens.add("LANG=${ProotManager.guestLang(distro)}")
-    envTokens.add("PS1=\\u@neoterm:\\w\\$ ")
-    envTokens.add("TMPDIR=/tmp")
-    envTokens.add("SHELL=$shell")
-    envTokens.add("DISPLAY=:0")
-    envTokens.add("XDG_RUNTIME_DIR=/tmp")
-    envTokens.add("MOZ_DISABLE_CONTENT_SANDBOX=1")
-    envTokens.add("MOZ_DISABLE_RDD_SANDBOX=1")
-    envTokens.add("CHROMIUM_FLAGS=--no-sandbox --disable-gpu")
-    envTokens.add("GTK_USE_PORTAL=0")
-    envTokens.add("NO_AT_BRIDGE=1")
-    extraEnv.forEach { if (it.isNotEmpty()) envTokens.add(it) }
-
-    val envArgs = envTokens.joinToString(" ") { sq(it) }
-    // For the interactive login shell, wrap it in `setsid --ctty` so it becomes
-    // a session leader with the PTY as its controlling terminal — otherwise the
-    // su-spawned shell has no job control ("cannot set terminal process group").
-    // One-shot package commands don't need a controlling terminal.
-    val shellPart = if (command.isEmpty()) {
-      "setsid --ctty ${sq(shell)} ${distro.loginArgs.joinToString(" ") { sq(it) }}"
+    // What to exec inside the chroot. For an interactive session use the distro's
+    // own su (proper login + controlling terminal -> job control). For a one-shot
+    // package command, a plain bash -c is enough.
+    val inChroot = if (command.isEmpty()) {
+      "exec chroot \"\$R\" /bin/su -p"
     } else {
-      "${sq(shell)} -c ${sq(command.joinToString(" "))}"
+      "exec chroot \"\$R\" /bin/bash -c ${sq(command.joinToString(" "))}"
     }
 
-    val ext = System.getenv("EXTERNAL_STORAGE")
-    val script = buildString {
+    // Root boot script (run via `su … -c "sh <file>"`): bind the kernel fs,
+    // export the guest env, then chroot. Written to a file so we don't have to
+    // quote a whole script inside `su -c "…"`.
+    val boot = buildString {
       append("R=").append(sq(rootfs)).append('\n')
-      append("mount --bind /dev \"\$R/dev\" 2>/dev/null\n")
-      append("mount --bind /proc \"\$R/proc\" 2>/dev/null\n")
-      append("mount --bind /sys \"\$R/sys\" 2>/dev/null\n")
-      append("mount --bind /dev/pts \"\$R/dev/pts\" 2>/dev/null\n")
-      append("mkdir -p \"\$R/dev/shm\" 2>/dev/null; mount -t tmpfs tmpfs \"\$R/dev/shm\" 2>/dev/null\n")
-      append("mkdir -p \"\$R/tmp/.X11-unix\" 2>/dev/null; mount --bind ").append(sq(x11Sock)).append(" \"\$R/tmp/.X11-unix\" 2>/dev/null\n")
-      if (ext != null && ext.isNotEmpty()) {
-        append("[ -d ").append(sq(ext)).append(" ] && mkdir -p \"\$R/sdcard\" && mount --bind ")
-          .append(sq(ext)).append(" \"\$R/sdcard\" 2>/dev/null\n")
+      append("for d in dev proc sys tmp dev/pts dev/shm tmp/.X11-unix root; do mkdir -p \"\$R/\$d\" 2>/dev/null; done\n")
+      append(bindIfNeeded("/dev", "\$R/dev"))
+      append(bindIfNeeded("/proc", "\$R/proc"))
+      append(bindIfNeeded("/sys", "\$R/sys"))
+      append("grep -q \" \$R/dev/pts \" /proc/mounts 2>/dev/null || mount -t devpts devpts \"\$R/dev/pts\" 2>/dev/null\n")
+      append("grep -q \" \$R/dev/shm \" /proc/mounts 2>/dev/null || mount -t tmpfs tmpfs \"\$R/dev/shm\" 2>/dev/null\n")
+      append("grep -q \" \$R/tmp/.X11-unix \" /proc/mounts 2>/dev/null || mount -o bind ").append(sq(x11Sock)).append(" \"\$R/tmp/.X11-unix\" 2>/dev/null\n")
+      if (ext.isNotEmpty()) {
+        append("if [ -d ").append(sq(ext)).append(" ]; then mkdir -p \"\$R/sdcard\" 2>/dev/null; grep -q \" \$R/sdcard \" /proc/mounts 2>/dev/null || mount -o bind ").append(sq(ext)).append(" \"\$R/sdcard\" 2>/dev/null; fi\n")
       }
-      append("cd \"\$R\" 2>/dev/null\n")
-      append("exec chroot \"\$R\" /usr/bin/env -i ").append(envArgs).append(' ').append(shellPart).append('\n')
+      // Guest environment (no PULSE_* — audio is direct in chroot).
+      append("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n")
+      append("export TERM=xterm-256color HOME=/root TMPDIR=/tmp USER=root LOGNAME=root\n")
+      append("export LANG=").append(sq(lang)).append('\n')
+      append("export DISPLAY=:0 XDG_RUNTIME_DIR=/tmp\n")
+      append("export MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1\n")
+      append("export CHROMIUM_FLAGS='--no-sandbox --disable-gpu' GTK_USE_PORTAL=0 NO_AT_BRIDGE=1\n")
+      extraEnv.forEach { if (it.isNotEmpty()) append("export ").append(sq(it)).append('\n') }
+      append(inChroot).append('\n')
+    }
+
+    val bootFile = File(
+      NeoTermPath.PROOT_ROOT_PATH,
+      if (command.isEmpty()) "chroot-boot.sh" else "chroot-exec.sh"
+    )
+    runCatching {
+      bootFile.parentFile?.mkdirs()
+      bootFile.writeText(boot)
+    }
+
+    // Launcher (runs as the Android shell on the PTY): detect su flavor and run
+    // the boot script as root in the global mount namespace.
+    val launcher = buildString {
+      append("export PATH=/sbin:/system/bin:/system/xbin:/vendor/bin:/odm/bin:/product/bin:.\n")
+      append("SU=\$(command -v su 2>/dev/null); [ -z \"\$SU\" ] && SU=/system/bin/su\n")
+      append("MV=\$(magisk -V 2>/dev/null); case \"\$MV\" in ''|*[!0-9]*) MV=0;; esac\n")
+      append("VER=\"\$(\$SU -V 2>/dev/null)\$(\$SU -v 2>/dev/null)\$(\$SU --version 2>/dev/null)\"\n")
+      append("case \"\$VER\" in\n")
+      append("  *KernelSU*) SUDO=\"\$SU -M -p -c\";;\n")
+      append("  *MagiskSU*) if [ \"\$MV\" -gt 28100 ]; then SUDO=\"\$SU -i -mm -c\"; else SUDO=\"\$SU -mm -c\"; fi;;\n")
+      append("  *) SUDO=\"\$SU -c\";;\n")
+      append("esac\n")
+      append("exec \$SUDO ").append(sq("sh ${sq(bootFile.absolutePath)}")).append('\n')
     }
 
     return ProotManager.Launch(
-      executable = su,
-      args = arrayOf("su", "-c", script),
+      executable = "/system/bin/sh",
+      args = arrayOf("sh", "-c", launcher),
       env = arrayOf(
         "PATH=/system/bin:/system/xbin:/sbin",
         "TERM=xterm-256color"
@@ -98,6 +108,9 @@ object ChrootManager {
     )
   }
 
-  /** Single-quote a token for safe use in the su shell script. */
+  private fun bindIfNeeded(src: String, dst: String): String =
+    "grep -q \" $dst \" /proc/mounts 2>/dev/null || mount -o bind $src \"$dst\" 2>/dev/null\n"
+
+  /** Single-quote a token for safe use in a POSIX shell. */
   private fun sq(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 }
