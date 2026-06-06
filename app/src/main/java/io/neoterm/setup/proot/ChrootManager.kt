@@ -60,8 +60,12 @@ object ChrootManager {
     extraEnv.forEach { if (it.isNotEmpty()) envTokens.add(it) }
 
     val envArgs = envTokens.joinToString(" ") { sq(it) }
+    // For the interactive login shell, wrap it in `setsid --ctty` so it becomes
+    // a session leader with the PTY as its controlling terminal — otherwise the
+    // su-spawned shell has no job control ("cannot set terminal process group").
+    // One-shot package commands don't need a controlling terminal.
     val shellPart = if (command.isEmpty()) {
-      "${sq(shell)} ${distro.loginArgs.joinToString(" ") { sq(it) }}"
+      "setsid --ctty ${sq(shell)} ${distro.loginArgs.joinToString(" ") { sq(it) }}"
     } else {
       "${sq(shell)} -c ${sq(command.joinToString(" "))}"
     }
