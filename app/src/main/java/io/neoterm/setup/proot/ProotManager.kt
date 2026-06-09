@@ -274,7 +274,7 @@ object ProotManager {
    * when the user has neither ~/.bash_profile nor ~/.bash_login (so we never
    * clobber an explicit user setup). Idempotent and cheap (a couple of stats).
    */
-  private fun ensureLoginSourcesBashrc(distro: Distro) {
+  internal fun ensureLoginSourcesBashrc(distro: Distro) {
     if (!distro.defaultShell.endsWith("bash")) return
     runCatching {
       val home = File(distro.rootfsPath(), "root")

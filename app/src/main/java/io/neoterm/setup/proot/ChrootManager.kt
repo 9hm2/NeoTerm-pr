@@ -38,6 +38,11 @@ object ChrootManager {
     File(x11Sock).apply { mkdirs() }
     val ext = System.getenv("EXTERNAL_STORAGE") ?: ""
 
+    // A login shell reads ~/.bash_profile/.profile, NOT ~/.bashrc; drop in a
+    // ~/.bash_profile that sources ~/.bashrc (same as proot mode) so the user's
+    // ~/.bashrc actually runs.
+    ProotManager.ensureLoginSourcesBashrc(distro)
+
     // What to exec inside the chroot.
     //
     // Interactive: we must give the guest shell its own session WITH a controlling
@@ -50,7 +55,8 @@ object ChrootManager {
     // SIGHUP the shell), and `-l` makes it a login shell (proper /root cwd +
     // profile). The guest's setsid is util-linux and supports --ctty (the earlier
     // breakage was the host toybox setsid, which does not). We cd to $HOME first so
-    // the login shell starts in /root.
+    // the login shell starts in /root, and `clear` the terminal so the host-side
+    // mount/setup output above isn't left on screen.
     //
     // One-shot package command: a plain bash -c is enough (no job control needed).
     //
@@ -58,7 +64,7 @@ object ChrootManager {
     // would otherwise hide /system/bin/chroot).
     val shell = loginShell ?: "/bin/bash"
     val inChroot = if (command.isEmpty()) {
-      "exec \"\$CH\" \"\$R\" /bin/bash -c 'cd \"\$HOME\" 2>/dev/null; if command -v setsid >/dev/null 2>&1; then exec setsid -w --ctty $shell -l; else exec $shell -l; fi'"
+      "exec \"\$CH\" \"\$R\" /bin/bash -c 'cd \"\$HOME\" 2>/dev/null; clear 2>/dev/null; if command -v setsid >/dev/null 2>&1; then exec setsid -w --ctty $shell -l; else exec $shell -l; fi'"
     } else {
       "exec \"\$CH\" \"\$R\" /bin/bash -c ${sq(command.joinToString(" "))}"
     }
@@ -72,20 +78,25 @@ object ChrootManager {
       append("export PATH=/sbin:/system/bin:/system/xbin:/vendor/bin:/odm/bin:/product/bin\n")
       append("CH=\$(command -v chroot 2>/dev/null); [ -z \"\$CH\" ] && CH=/system/bin/chroot\n")
       append("R=").append(sq(rootfs)).append('\n')
-      append("for d in dev proc sys tmp dev/pts dev/shm tmp/.X11-unix root; do mkdir -p \"\$R/\$d\" 2>/dev/null; done\n")
+      // Silence the whole setup phase (both streams) so no mkdir/mount noise is
+      // left on the terminal above the login prompt. The grouping runs in the
+      // current shell, so the env exports that follow still take effect.
+      append("{\n")
+      append("for d in dev proc sys tmp dev/pts dev/shm tmp/.X11-unix root; do mkdir -p \"\$R/\$d\"; done\n")
       append(bindIfNeeded("/dev", "\$R/dev"))
       append(bindIfNeeded("/proc", "\$R/proc"))
       append(bindIfNeeded("/sys", "\$R/sys"))
-      append("grep -q \" \$R/dev/pts \" /proc/mounts 2>/dev/null || mount -t devpts devpts \"\$R/dev/pts\" 2>/dev/null\n")
-      append("grep -q \" \$R/dev/shm \" /proc/mounts 2>/dev/null || mount -t tmpfs tmpfs \"\$R/dev/shm\" 2>/dev/null\n")
-      append("grep -q \" \$R/tmp/.X11-unix \" /proc/mounts 2>/dev/null || mount -o bind ").append(sq(x11Sock)).append(" \"\$R/tmp/.X11-unix\" 2>/dev/null\n")
+      append("grep -q \" \$R/dev/pts \" /proc/mounts || mount -t devpts devpts \"\$R/dev/pts\"\n")
+      append("grep -q \" \$R/dev/shm \" /proc/mounts || mount -t tmpfs tmpfs \"\$R/dev/shm\"\n")
+      append("grep -q \" \$R/tmp/.X11-unix \" /proc/mounts || mount -o bind ").append(sq(x11Sock)).append(" \"\$R/tmp/.X11-unix\"\n")
       if (ext.isNotEmpty()) {
-        append("if [ -d ").append(sq(ext)).append(" ]; then mkdir -p \"\$R/sdcard\" 2>/dev/null; grep -q \" \$R/sdcard \" /proc/mounts 2>/dev/null || mount -o bind ").append(sq(ext)).append(" \"\$R/sdcard\" 2>/dev/null; fi\n")
+        append("if [ -d ").append(sq(ext)).append(" ]; then mkdir -p \"\$R/sdcard\"; grep -q \" \$R/sdcard \" /proc/mounts || mount -o bind ").append(sq(ext)).append(" \"\$R/sdcard\"; fi\n")
       }
       // We are already root with direct kernel access, so let apt download as root
       // instead of dropping to the _apt user (which can't traverse the chroot and
       // prints a harmless "Permission denied … unsandboxed as root" warning).
-      append("if [ -d \"\$R/etc/apt/apt.conf.d\" ] && [ ! -e \"\$R/etc/apt/apt.conf.d/99neoterm\" ]; then printf 'APT::Sandbox::User \"root\";\\n' > \"\$R/etc/apt/apt.conf.d/99neoterm\" 2>/dev/null; fi\n")
+      append("if [ -d \"\$R/etc/apt/apt.conf.d\" ] && [ ! -e \"\$R/etc/apt/apt.conf.d/99neoterm\" ]; then printf 'APT::Sandbox::User \"root\";\\n' > \"\$R/etc/apt/apt.conf.d/99neoterm\"; fi\n")
+      append("} >/dev/null 2>&1\n")
       // Guest environment (no PULSE_* — audio is direct in chroot).
       append("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n")
       append("export TERM=xterm-256color HOME=/root TMPDIR=/tmp USER=root LOGNAME=root\n")
@@ -133,7 +144,7 @@ object ChrootManager {
   }
 
   private fun bindIfNeeded(src: String, dst: String): String =
-    "grep -q \" $dst \" /proc/mounts 2>/dev/null || mount -o bind $src \"$dst\" 2>/dev/null\n"
+    "grep -q \" $dst \" /proc/mounts || mount -o bind $src \"$dst\"\n"
 
   /** Single-quote a token for safe use in a POSIX shell. */
   private fun sq(s: String): String = "'" + s.replace("'", "'\\''") + "'"
