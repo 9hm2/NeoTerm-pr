@@ -38,33 +38,39 @@ object ChrootManager {
     File(x11Sock).apply { mkdirs() }
     val ext = System.getenv("EXTERNAL_STORAGE") ?: ""
 
-    // A login shell reads ~/.bash_profile/.profile, NOT ~/.bashrc; drop in a
-    // ~/.bash_profile that sources ~/.bashrc (same as proot mode) so the user's
-    // ~/.bashrc actually runs.
-    ProotManager.ensureLoginSourcesBashrc(distro)
-
     // What to exec inside the chroot.
     //
     // Interactive: we must give the guest shell its own session WITH a controlling
     // terminal, otherwise it isn't the foreground process group and Ctrl+C kills
     // the whole pipeline instead of the foreground job. The host su (Magisk -mm)
     // forks rather than execs, so the shell would not be the session leader on its
-    // own. So inside the chroot we run `setsid -w --ctty <shell> -l`: setsid makes
-    // a new session + sets the tty as its controlling terminal, `-w` keeps the
+    // own. So inside the chroot we run `setsid -w --ctty <shell> …`: setsid makes a
+    // new session + sets the tty as its controlling terminal, and `-w` keeps the
     // chain alive until the shell exits (else the host su would return early and
-    // SIGHUP the shell), and `-l` makes it a login shell (proper /root cwd +
-    // profile). The guest's setsid is util-linux and supports --ctty (the earlier
-    // breakage was the host toybox setsid, which does not). We cd to $HOME first so
-    // the login shell starts in /root, and `clear` the terminal so the host-side
+    // SIGHUP the shell). The guest's setsid is util-linux and supports --ctty (the
+    // earlier breakage was the host toybox setsid, which does not). We cd to $HOME
+    // first so the shell starts in /root, and `clear` the terminal so the host-side
     // mount/setup output above isn't left on screen.
+    //
+    // For bash we DON'T rely on the login-file chain (~/.bash_profile/.profile →
+    // ~/.bashrc): some rootfs setups have a login file that never reaches
+    // ~/.bashrc, so it silently doesn't run. Instead we hand bash an explicit
+    // --rcfile that sources /etc/profile, /etc/bash.bashrc and ~/.bashrc in order
+    // (login env + user rc, deterministically). Other shells fall back to `-l`.
     //
     // One-shot package command: a plain bash -c is enough (no job control needed).
     //
     // "$CH" is the resolved host chroot binary (the guest PATH we export below
     // would otherwise hide /system/bin/chroot).
     val shell = loginShell ?: "/bin/bash"
+    val shellInvoke = if (shell.endsWith("bash")) {
+      writeBashRcFile(rootfs)
+      "$shell --rcfile $RC_FILE -i"
+    } else {
+      "$shell -l"
+    }
     val inChroot = if (command.isEmpty()) {
-      "exec \"\$CH\" \"\$R\" /bin/bash -c 'cd \"\$HOME\" 2>/dev/null; clear 2>/dev/null; if command -v setsid >/dev/null 2>&1; then exec setsid -w --ctty $shell -l; else exec $shell -l; fi'"
+      "exec \"\$CH\" \"\$R\" /bin/bash -c 'cd \"\$HOME\" 2>/dev/null; clear 2>/dev/null; if command -v setsid >/dev/null 2>&1; then exec setsid -w --ctty $shellInvoke; else exec $shellInvoke; fi'"
     } else {
       "exec \"\$CH\" \"\$R\" /bin/bash -c ${sq(command.joinToString(" "))}"
     }
@@ -148,6 +154,30 @@ object ChrootManager {
 
   private fun bindIfNeeded(src: String, dst: String): String =
     "grep -q \" $dst \" /proc/mounts || mount -o bind $src \"$dst\"\n"
+
+  /** Guest-side path of the bash rc file we hand to `bash --rcfile`. */
+  private const val RC_FILE = "/root/.neoterm_login"
+
+  /**
+   * Write the bash rc file inside the rootfs. With `bash --rcfile <file> -i` bash
+   * reads ONLY this file (instead of /etc/bash.bashrc + ~/.bashrc), so we source
+   * the standard startup files ourselves, in login order: /etc/profile (login
+   * env + /etc/profile.d/*), /etc/bash.bashrc (system interactive rc), then
+   * ~/.bashrc (user rc — PATH additions like ~/.local/bin, aliases, prompt).
+   * Idempotent: overwritten on every launch.
+   */
+  private fun writeBashRcFile(rootfs: String) {
+    runCatching {
+      File("$rootfs/root").mkdirs()
+      File("$rootfs$RC_FILE").writeText(
+        "# Created by NeoTerm (chroot): source the standard startup files so the\n" +
+          "# interactive shell gets login env AND the user's ~/.bashrc.\n" +
+          "[ -r /etc/profile ] && . /etc/profile\n" +
+          "[ -r /etc/bash.bashrc ] && . /etc/bash.bashrc\n" +
+          "if [ -r \"\$HOME/.bashrc\" ]; then . \"\$HOME/.bashrc\"; fi\n"
+      )
+    }
+  }
 
   /** Single-quote a token for safe use in a POSIX shell. */
   private fun sq(s: String): String = "'" + s.replace("'", "'\\''") + "'"
