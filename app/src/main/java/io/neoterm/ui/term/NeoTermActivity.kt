@@ -124,6 +124,11 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     tabDots = findViewById(R.id.tab_dots)
 
     tabSwitcher = findViewById(R.id.tab_switcher)
+    // Don't let the switcher persist tabs into instance state: restored tabs
+    // come back as plain Tab (the NeoTab subclass is lost in the Parcelable),
+    // which crashed lifecycle casts after fold/unfold recreation. Tabs are
+    // rebuilt from the service's live sessions anyway (enterMain).
+    tabSwitcher.isSaveEnabled = false
     tabSwitcher.decorator = NeoTabDecorator(this)
     ViewCompat.setOnApplyWindowInsetsListener(tabSwitcher, createWindowInsetsListener())
     tabSwitcher.showToolbars(false)
@@ -306,7 +311,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
 
   override fun onPause() {
     super.onPause()
-    val tab = tabSwitcher.selectedTab as NeoTab?
+    val tab = tabSwitcher.selectedTab as? NeoTab
     tab?.onPause()
   }
 
@@ -359,7 +364,10 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       override fun onAllTabsRemoved(tabSwitcher: TabSwitcher, tabs: Array<out Tab>, animation: Animation) {
       }
     })
-    val tab = tabSwitcher.selectedTab as NeoTab?
+    // Safe cast: after activity recreation (e.g. fold/unfold, theme change) the
+    // TabSwitcher can restore plain Tab instances from saved state that are not
+    // our NeoTab subclasses — a forced cast crashes onResume.
+    val tab = tabSwitcher.selectedTab as? NeoTab
     tab?.onResume()
     // Match the title bar + system bars to the terminal background on every
     // resume (incl. the very first launch), so it applies without having to
@@ -414,7 +422,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   override fun onStart() {
     super.onStart()
     EventBus.getDefault().register(this)
-    val tab = tabSwitcher.selectedTab as NeoTab?
+    val tab = tabSwitcher.selectedTab as? NeoTab
     tab?.onStart()
   }
 
@@ -423,7 +431,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     // After stopped, window locations may changed
     // Rebind it at next time.
     forEachTab<TermTab> { it.resetAutoCompleteStatus() }
-    val tab = tabSwitcher.selectedTab as NeoTab?
+    val tab = tabSwitcher.selectedTab as? NeoTab
     tab?.onStop()
     EventBus.getDefault().unregister(this)
   }
@@ -431,7 +439,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   override fun onDestroy() {
     super.onDestroy()
     if (instance === this) instance = null
-    val tab = tabSwitcher.selectedTab as NeoTab?
+    val tab = tabSwitcher.selectedTab as? NeoTab
     tab?.onDestroy()
     PreferenceManager.getDefaultSharedPreferences(this)
       .unregisterOnSharedPreferenceChangeListener(this)
@@ -447,7 +455,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
 
   override fun onWindowFocusChanged(hasFocus: Boolean) {
     super.onWindowFocusChanged(hasFocus)
-    val tab = tabSwitcher.selectedTab as NeoTab?
+    val tab = tabSwitcher.selectedTab as? NeoTab
     tab?.onWindowFocusChanged(hasFocus)
     if (hasFocus) {
       raiseKeyboardForSelectedTab()
