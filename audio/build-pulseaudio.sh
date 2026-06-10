@@ -53,8 +53,29 @@ export STRIP="$TOOLCHAIN/bin/llvm-strip"
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
 
+# Robust download: try each URL with retries/backoff and reject tiny error pages.
+# GNU's ftpmirror.gnu.org sometimes redirects to an HTML error instead of the
+# tarball, which then fails to untar ("This does not look like a tar archive").
+fetch() {
+  local out="$1"; shift
+  local minsize="${MIN_FETCH_SIZE:-1024}"
+  local url tries
+  for url in "$@"; do
+    for tries in 1 2 3 4; do
+      if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$out" "$url" \
+         && [ "$(stat -c%s "$out" 2>/dev/null || echo 0)" -ge "$minsize" ]; then
+        return 0
+      fi
+      echo "  download failed ($url), attempt $tries" >&2
+      sleep $((tries * 2))
+    done
+  done
+  echo "ERROR: could not download $out from: $*" >&2
+  return 1
+}
+
 echo "── libsndfile $SNDFILE_VERSION (cmake/NDK) ──"
-curl -L -o "$WORK/sndfile.tar.xz" \
+fetch "$WORK/sndfile.tar.xz" \
   "https://github.com/libsndfile/libsndfile/releases/download/${SNDFILE_VERSION}/libsndfile-${SNDFILE_VERSION}.tar.xz"
 tar -C "$WORK" -xf "$WORK/sndfile.tar.xz"
 cmake -S "$WORK/libsndfile-${SNDFILE_VERSION}" -B "$WORK/sndfile-build" \
@@ -107,7 +128,9 @@ cp "$WORK/libintl.h" "$PREFIX/include/libintl.h"
 # PulseAudio loads modules via libltdl, absent on Android — cross-build it.
 LIBTOOL_VERSION="${LIBTOOL_VERSION:-2.4.7}"
 echo "── libltdl $LIBTOOL_VERSION (autotools/NDK) ──"
-curl -L -o "$WORK/libtool.tar.gz" \
+fetch "$WORK/libtool.tar.gz" \
+  "https://ftp.gnu.org/gnu/libtool/libtool-${LIBTOOL_VERSION}.tar.gz" \
+  "https://mirrors.kernel.org/gnu/libtool/libtool-${LIBTOOL_VERSION}.tar.gz" \
   "https://ftpmirror.gnu.org/libtool/libtool-${LIBTOOL_VERSION}.tar.gz"
 tar -C "$WORK" -xf "$WORK/libtool.tar.gz"
 (
@@ -123,8 +146,9 @@ tar -C "$WORK" -xf "$WORK/libtool.tar.gz"
 )
 
 echo "── PulseAudio $PA_VERSION (meson/NDK) ──"
-curl -L -o "$WORK/pa.tar.xz" \
-  "https://www.freedesktop.org/software/pulseaudio/releases/pulseaudio-${PA_VERSION}.tar.xz"
+fetch "$WORK/pa.tar.xz" \
+  "https://www.freedesktop.org/software/pulseaudio/releases/pulseaudio-${PA_VERSION}.tar.xz" \
+  "https://freedesktop.org/software/pulseaudio/releases/pulseaudio-${PA_VERSION}.tar.xz"
 tar -C "$WORK" -xf "$WORK/pa.tar.xz"
 PA_SRC="$WORK/pulseaudio-${PA_VERSION}"
 
@@ -138,9 +162,9 @@ sed -i 's|^void pa_drop_root(void) {|void pa_drop_root(void) { return; /* NeoTer
 # AudioTrack (which drifted and underran).
 echo "── add OpenSL ES + AAudio sink/source modules ──"
 mkdir -p "$PA_SRC/src/modules/sles" "$PA_SRC/src/modules/aaudio"
-curl -L -o "$PA_SRC/src/modules/sles/module-sles-sink.c" \
+MIN_FETCH_SIZE=256 fetch "$PA_SRC/src/modules/sles/module-sles-sink.c" \
   "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pulseaudio/module-sles-sink.c"
-curl -L -o "$PA_SRC/src/modules/aaudio/module-aaudio-sink.c" \
+MIN_FETCH_SIZE=256 fetch "$PA_SRC/src/modules/aaudio/module-aaudio-sink.c" \
   "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pulseaudio/module-aaudio-sink.c"
 # Termux ships no AAudio source — use our own (microphone capture). OpenSL's
 # source would drag in libOpenSLES→libinput→libtinyxml2, which doesn't resolve
