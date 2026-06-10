@@ -1309,6 +1309,12 @@ public final class TerminalView extends View {
       scrollTo(0, 0);
       invalidate();
     }
+
+    // Keep the emulator's cell pixel size current so Sixel images map to the
+    // right number of cells (also covers font-size/pinch-zoom changes).
+    if (mEmulator != null) {
+      mEmulator.setCellSize((int) mRenderer.mFontWidth, mRenderer.mFontLineSpacing);
+    }
   }
 
   @Override

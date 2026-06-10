@@ -138,6 +138,8 @@ public final class TerminalEmulator {
    * Needs to be large enough to contain reasonable OSC 52 pastes.
    */
   private static final int MAX_OSC_STRING_LENGTH = 8192;
+  /** DCS strings can carry large Sixel image payloads, so allow much more. */
+  private static final int MAX_DCS_STRING_LENGTH = 1 << 21;
 
   /**
    * DECSET 1 - application cursorColor keys.
@@ -919,8 +921,12 @@ public final class TerminalEmulator {
       case (byte) '\\': // End of ESC \ string Terminator
       {
         String dcs = mOSCOrDeviceControlArgs.toString();
+        // Sixel graphics: DCS <params> q <data> ST.
+        if (sixelIntroducerIndex(dcs) >= 0) {
+          processSixel(dcs);
+        }
         // DCS $ q P t ST. Request Status String (DECRQSS)
-        if (dcs.startsWith("$q")) {
+        else if (dcs.startsWith("$q")) {
           if (dcs.equals("$q\"p")) {
             // DECSCL, conformance level, http://www.vt100.net/docs/vt510-rm/DECSCL:
             String csiString = "64;1\"p";
@@ -1018,7 +1024,9 @@ public final class TerminalEmulator {
       }
       break;
       default:
-        if (mOSCOrDeviceControlArgs.length() > MAX_OSC_STRING_LENGTH) {
+        // DCS (device control) strings can be large for Sixel image data, so use
+        // a much higher cap than OSC strings.
+        if (mOSCOrDeviceControlArgs.length() > MAX_DCS_STRING_LENGTH) {
           // Too long.
           mOSCOrDeviceControlArgs.setLength(0);
           finishSequence();
@@ -1137,6 +1145,91 @@ public final class TerminalEmulator {
   public boolean isSynchronizeUpdates() {
     return mSynchronizeUpdates
       && (System.currentTimeMillis() - mSynchronizeUpdatesStartMillis) < SYNCHRONIZE_UPDATES_TIMEOUT_MILLIS;
+  }
+
+  // ---- Inline images (Sixel) ----
+  /** Pixel size of one terminal cell, pushed from the view so we can map an
+   *  image's pixel size to a number of cells. 0 until the view reports it. */
+  private int mCellWidthPixels = 0;
+  private int mCellHeightPixels = 0;
+  private static final int MAX_BITMAPS = 32;
+  private final java.util.LinkedHashMap<Integer, TerminalBitmap> mBitmaps = new java.util.LinkedHashMap<>();
+  private int mNextBitmapId = 1;
+
+  /** Called by the view when font metrics change so Sixel sizing stays correct. */
+  public void setCellSize(int widthPixels, int heightPixels) {
+    mCellWidthPixels = widthPixels;
+    mCellHeightPixels = heightPixels;
+  }
+
+  public TerminalBitmap getBitmap(int id) {
+    return mBitmaps.get(id);
+  }
+
+  public boolean hasBitmaps() {
+    return !mBitmaps.isEmpty();
+  }
+
+  private int registerBitmap(TerminalBitmap bitmap) {
+    int id = mNextBitmapId++;
+    if (mNextBitmapId > 0xffff) mNextBitmapId = 1;
+    mBitmaps.put(id, bitmap);
+    // Bound memory: drop the oldest images. We do NOT recycle them — cells still
+    // scrolled in history may reference one; getBitmap() then returns null and the
+    // renderer simply leaves those cells blank.
+    while (mBitmaps.size() > MAX_BITMAPS) {
+      mBitmaps.remove(mBitmaps.keySet().iterator().next());
+    }
+    return id;
+  }
+
+  /**
+   * Decode a Sixel DCS (already stripped to "{@code <params>q<data>}") and lay it
+   * into the screen as a grid of image cells starting at the cursor, scrolling as
+   * needed. The cursor is left on the line below the image (sixel scrolling).
+   */
+  private void processSixel(String dcs) {
+    if (mCellWidthPixels <= 0 || mCellHeightPixels <= 0) return;
+    int q = sixelIntroducerIndex(dcs);
+    if (q < 0) return;
+    Sixel.Image img = Sixel.decode(dcs.substring(q + 1));
+    if (img == null || img.width <= 0 || img.height <= 0) return;
+
+    android.graphics.Bitmap bmp;
+    try {
+      bmp = android.graphics.Bitmap.createBitmap(img.pixels, img.width, img.height,
+        android.graphics.Bitmap.Config.ARGB_8888);
+    } catch (Exception e) {
+      return;
+    }
+
+    // Natural cell span (kept in the holder so tiles map without distortion);
+    // cells past the right edge are simply clipped, not squeezed.
+    int cols = Math.max(1, (img.width + mCellWidthPixels - 1) / mCellWidthPixels);
+    int rows = Math.max(1, (img.height + mCellHeightPixels - 1) / mCellHeightPixels);
+    int startCol = mCursorCol;
+
+    int id = registerBitmap(new TerminalBitmap(bmp, cols, rows));
+
+    for (int r = 0; r < rows; r++) {
+      for (int c = 0; c < cols && (startCol + c) < mColumns; c++) {
+        mScreen.setChar(startCol + c, mCursorRow, ' ', TextStyle.encodeImage(id, c, r));
+      }
+      doLinefeed();
+    }
+    setCursorCol(Math.min(startCol, mColumns - 1));
+  }
+
+  /** Index of the Sixel introducer 'q' if {@code dcs} starts with only digits/';'
+   *  before it (distinguishing Sixel from DECRQSS "$q"/termcap "+q"), else -1. */
+  private static int sixelIntroducerIndex(String dcs) {
+    for (int i = 0; i < dcs.length(); i++) {
+      char c = dcs.charAt(i);
+      if (c == 'q') return i;
+      if ((c >= '0' && c <= '9') || c == ';') continue;
+      return -1;
+    }
+    return -1;
   }
 
   public void doDecSetOrReset(boolean setting, int externalBit) {
@@ -1674,7 +1767,8 @@ public final class TerminalEmulator {
         // The important part that may still be used by some (tmux stores this value but does not currently use it)
         // is the first response parameter identifying the terminal service class, where we send 64 for "vt420".
         // This is followed by a list of attributes which is probably unused by applications. Send like xterm.
-        if (getArg0(0) == 0) mSession.write("\033[?64;1;2;6;9;15;18;21;22c");
+        // "4" advertises Sixel graphics support so apps (libsixel, chafa, …) use it.
+        if (getArg0(0) == 0) mSession.write("\033[?64;1;2;4;6;9;15;18;21;22c");
         break;
       case 'd': // ESC [ Pn d - Vert Position Absolute
         setCursorRow(Math.min(Math.max(1, getArg0(1)), mRows) - 1);

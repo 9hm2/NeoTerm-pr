@@ -3,6 +3,8 @@ package io.neoterm.frontend.session.view;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
+import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import io.neoterm.backend.*;
 
@@ -41,6 +43,11 @@ final class TerminalRenderer {
   protected float savedLastDrawnLineY;
 
   private final float[] asciiMeasures = new float[127];
+
+  // Reusable objects for drawing inline image (Sixel) cell tiles.
+  private final Rect mImageSrc = new Rect();
+  private final RectF mImageDst = new RectF();
+  private final Paint mImagePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
   public TerminalRenderer(int textSize, Typeface typeface) {
     mTextSize = textSize;
@@ -163,6 +170,36 @@ final class TerminalRenderer {
       int cursorColor = lastRunInsideCursor ? mEmulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] : 0;
       drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun, lastRunStartIndex, charsSinceLastRun,
         measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo, lastRunUrl);
+
+      // Inline image (Sixel) cells: drawTextRun skips them, so draw their bitmap
+      // tiles here over the (blank) cells. Only when images exist on screen.
+      if (mEmulator.hasBitmaps()) {
+        drawImageCells(canvas, mEmulator, lineObject, columns, heightOffset);
+      }
+    }
+  }
+
+  /** Draw the bitmap tile of every inline-image cell in a row. */
+  private void drawImageCells(Canvas canvas, TerminalEmulator emulator, TerminalRow lineObject, int columns, float baselineY) {
+    final float top = baselineY - mFontLineSpacing;
+    for (int column = 0; column < columns; column++) {
+      final long style = lineObject.getStyle(column);
+      if (!TextStyle.isImage(style)) continue;
+      final TerminalBitmap holder = emulator.getBitmap(TextStyle.decodeImageId(style));
+      if (holder == null || holder.bitmap == null || holder.cellCols <= 0 || holder.cellRows <= 0) continue;
+      final int tileCol = TextStyle.decodeImageCol(style);
+      final int tileRow = TextStyle.decodeImageRow(style);
+      final int bw = holder.bitmap.getWidth();
+      final int bh = holder.bitmap.getHeight();
+      final int sl = (int) ((long) tileCol * bw / holder.cellCols);
+      final int sr = (int) ((long) (tileCol + 1) * bw / holder.cellCols);
+      final int st = (int) ((long) tileRow * bh / holder.cellRows);
+      final int sb = (int) ((long) (tileRow + 1) * bh / holder.cellRows);
+      if (sr <= sl || sb <= st) continue;
+      mImageSrc.set(sl, st, sr, sb);
+      final float left = column * mFontWidth;
+      mImageDst.set(left, top, left + mFontWidth, top + mFontLineSpacing);
+      canvas.drawBitmap(holder.bitmap, mImageSrc, mImageDst, mImagePaint);
     }
   }
 
@@ -265,6 +302,9 @@ final class TerminalRenderer {
   private void drawTextRun(Canvas canvas, char[] text, int[] palette, float y, int startColumn, int runWidthColumns,
                            int startCharIndex, int runWidthChars, float mes, int cursor, int cursorStyle,
                            long textStyle, boolean reverseVideo, boolean forceUnderline) {
+    // Inline image cells are drawn separately (drawImageCells); skip them here so
+    // their packed image id isn't misread as colours.
+    if (TextStyle.isImage(textStyle)) return;
     int foreColor = TextStyle.decodeForeColor(textStyle);
     final int effect = TextStyle.decodeEffect(textStyle);
     int backColor = TextStyle.decodeBackColor(textStyle);

@@ -42,6 +42,14 @@ public final class TextStyle {
    */
   private final static int CHARACTER_ATTRIBUTE_TRUECOLOR_BACKGROUND = 1 << 10;
 
+  /**
+   * Marks a cell as part of an inline image (e.g. Sixel) instead of text. When
+   * set, the colour fields don't hold colours: they pack the image id and the
+   * cell's tile coordinates (see {@link #encodeImage}). Bit 11 is above the 11
+   * bits {@link #decodeEffect} reads, so normal effect decoding ignores it.
+   */
+  public final static long CHARACTER_ATTRIBUTE_IMAGE = 1L << 11;
+
   public final static int COLOR_INDEX_FOREGROUND = 256;
   public final static int COLOR_INDEX_BACKGROUND = 257;
   public final static int COLOR_INDEX_CURSOR = 258;
@@ -95,6 +103,33 @@ public final class TextStyle {
 
   public static int decodeEffect(long style) {
     return (int) (style & 0b11111111111);
+  }
+
+  // ---- Inline image (Sixel) cells ----
+  // Layout when CHARACTER_ATTRIBUTE_IMAGE is set: id in bits 16..31 (16 bits),
+  // tile column in bits 32..43 (12 bits), tile row in bits 44..55 (12 bits).
+
+  public static long encodeImage(int id, int tileCol, int tileRow) {
+    return CHARACTER_ATTRIBUTE_IMAGE
+      | ((id & 0xffffL) << 16)
+      | ((tileCol & 0xfffL) << 32)
+      | ((tileRow & 0xfffL) << 44);
+  }
+
+  public static boolean isImage(long style) {
+    return (style & CHARACTER_ATTRIBUTE_IMAGE) != 0;
+  }
+
+  public static int decodeImageId(long style) {
+    return (int) ((style >>> 16) & 0xffffL);
+  }
+
+  public static int decodeImageCol(long style) {
+    return (int) ((style >>> 32) & 0xfffL);
+  }
+
+  public static int decodeImageRow(long style) {
+    return (int) ((style >>> 44) & 0xfffL);
   }
 
 }
