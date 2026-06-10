@@ -293,6 +293,13 @@ public class TerminalSession extends TerminalOutput {
    * Notify the {@link #mChangeCallback} that the screen has changed.
    */
   private void notifyScreenUpdate() {
+    // Honor synchronized output (DEC private mode 2026): while the application is
+    // drawing a frame, skip the repaint so partial updates aren't shown. The
+    // repaint after the application resets the mode (or after the safety timeout)
+    // shows the finished frame.
+    if (mEmulator != null && mEmulator.isSynchronizeUpdates()) {
+      return;
+    }
     mChangeCallback.onTextChanged(this);
   }
 

@@ -850,8 +850,11 @@ public final class TerminalEmulator {
                 value = (mScreen == mAltBuffer) ? 1 : 2;
               } else {
                 int internalBit = mapDecSetBitToInternalBit(mode);
-                if (internalBit == -1) {
+                if (internalBit != -1) {
                   value = isDecsetInternalBitSet(internalBit) ? 1 : 2; // 1=set, 2=reset.
+                } else if (mode == 2026) {
+                  // Synchronized output: report current state so apps know it's supported.
+                  value = mSynchronizeUpdates ? 1 : 2;
                 } else {
                   Log.e(EmulatorDebug.LOG_TAG, "Got DECRQM for unrecognized private DEC mode=" + mode);
                   value = 0; // 0=not recognized, 3=permanently set, 4=permanently reset
@@ -1119,6 +1122,23 @@ public final class TerminalEmulator {
     }
   }
 
+  /** Synchronized output (DEC private mode 2026) state. */
+  private boolean mSynchronizeUpdates = false;
+  private long mSynchronizeUpdatesStartMillis = 0;
+  /** Safety cap so a program that sets BSU but never resets it can't freeze the
+   *  display: after this long we paint again even while the mode is still set. */
+  private static final long SYNCHRONIZE_UPDATES_TIMEOUT_MILLIS = 250;
+
+  /**
+   * Whether rendering should currently be suppressed because the application is
+   * in the middle of a synchronized update (DEC private mode 2026). Times out so
+   * a missing reset can't freeze the terminal.
+   */
+  public boolean isSynchronizeUpdates() {
+    return mSynchronizeUpdates
+      && (System.currentTimeMillis() - mSynchronizeUpdatesStartMillis) < SYNCHRONIZE_UPDATES_TIMEOUT_MILLIS;
+  }
+
   public void doDecSetOrReset(boolean setting, int externalBit) {
     int internalBit = mapDecSetBitToInternalBit(externalBit);
     if (internalBit != -1) {
@@ -1209,6 +1229,14 @@ public final class TerminalEmulator {
       }
       case 2004:
         // Bracketed paste mode - setting bit is enough.
+        break;
+      case 2026:
+        // Synchronized output (BSU/ESU): while set, the application is drawing a
+        // full frame and the display should not be repainted until it resets the
+        // mode, to avoid showing partial/torn updates. Rendering suppression is
+        // handled by TerminalSession via isSynchronizeUpdates().
+        mSynchronizeUpdates = setting;
+        if (setting) mSynchronizeUpdatesStartMillis = System.currentTimeMillis();
         break;
       default:
         unknownParameter(externalBit);
