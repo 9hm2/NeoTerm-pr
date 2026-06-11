@@ -105,6 +105,10 @@ dependencies {
   implementation 'androidx.cardview:cardview:1.0.0'
   implementation 'androidx.appcompat:appcompat:1.2.0'
   implementation 'androidx.appcompat:appcompat-resources:1.2.0'
+  // Real swipeable pager for live terminal tabs: adjacent tabs are laid out and
+  // live during a horizontal drag (peek + snap-back). 1.0.0 is compatible with
+  // appcompat 1.2.0 / the rest of the androidx stack used here.
+  implementation 'androidx.viewpager2:viewpager2:1.0.0'
 
   implementation project(':chrome-tabs')
   implementation project(':NeoLang')
