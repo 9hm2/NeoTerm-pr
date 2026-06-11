@@ -63,6 +63,12 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
      * blank). */
     private const val FIRST_SESSION_DELAY_MS = 350L
 
+    /** How far (in real-count blocks) the virtual position may drift from the
+     * middle before we silently re-seat it. With LOOP_COUNT = 100_000 the runway
+     * is tens of thousands of blocks, so this is just hygiene against pathologically
+     * long single-direction swiping; re-seating sooner keeps us far from the ends. */
+    private const val RECENTER_DRIFT_BLOCKS = 1000
+
     /** Live instance, so the service's "Exit" action can finish the activity
      * (and remove its task) — otherwise the still-bound/recents activity would
      * re-create the service and its notification right after Exit. Cleared in
@@ -98,13 +104,24 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   private var updateChecked = false
 
   // ---- Pager model helpers (mirror the old TabSwitcher accessors) ----
+  //
+  // In infinite/circular mode (realCount >= 3) the pager's currentItem is a
+  // *virtual* position; the real tab it shows is currentItem % realCount. Every
+  // user-facing index below goes through realIndex(...) so it keeps meaning the
+  // real tab whether or not looping is active. selectedVirtualIndex is the raw
+  // pager position (used when we need to set/animate the pager itself).
+
+  /** The real tab index the pager is currently showing. */
+  private val selectedTabIndex: Int
+    get() = pagerAdapter.realIndex(viewPager.currentItem)
+
+  /** The raw (possibly virtual) pager position. */
+  private val selectedVirtualIndex: Int
+    get() = viewPager.currentItem
 
   /** The currently visible tab (or null when there are no tabs). */
   private val selectedTab: NeoTab?
-    get() = tabs.getOrNull(viewPager.currentItem)
-
-  private val selectedTabIndex: Int
-    get() = viewPager.currentItem
+    get() = tabs.getOrNull(selectedTabIndex)
 
   private val tabCount: Int
     get() = tabs.size
@@ -173,7 +190,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
    */
   private val pageChangeCallback = object : ViewPager2.OnPageChangeCallback() {
     override fun onPageSelected(position: Int) {
-      when (val tab = tabs.getOrNull(position)) {
+      // In looping mode [position] is a virtual position; resolve the real tab.
+      when (val tab = tabs.getOrNull(pagerAdapter.realIndex(position))) {
         is TermTab -> {
           toolbar.visibility = View.VISIBLE
           tab.termData.termSession?.let { NeoPreference.storeCurrentSession(it) }
@@ -189,6 +207,34 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       updateTabDots()
       applyTerminalSystemColors()
       raiseKeyboardForSelectedTab()
+    }
+
+    override fun onPageScrollStateChanged(state: Int) {
+      // Once a swipe settles, re-center the virtual position back to the middle
+      // block so the user can never drift toward the ends of the virtual range.
+      // Done only while idle so we never jump mid-drag/mid-settle.
+      if (state == ViewPager2.SCROLL_STATE_IDLE) {
+        recenterIfNeeded()
+      }
+    }
+  }
+
+  /**
+   * In looping mode, jump (without animation) from the current virtual position
+   * to the equivalent position in the middle block of the virtual range, so
+   * there is always a huge runway of pages on both sides. The jump is invisible
+   * because the destination renders the same real tab (position % realCount is
+   * unchanged). No-op in finite mode or when already comfortably centered.
+   */
+  private fun recenterIfNeeded() {
+    if (!pagerAdapter.isLooping) return
+    val current = viewPager.currentItem
+    val realIndex = pagerAdapter.realIndex(current)
+    val centered = pagerAdapter.startPosition(realIndex)
+    // Only re-seat if we've drifted a long way from center, to avoid churn.
+    val driftBlocks = Math.abs(current - centered) / pagerAdapter.realCount
+    if (driftBlocks >= RECENTER_DRIFT_BLOCKS) {
+      viewPager.setCurrentItem(centered, false)
     }
   }
 
@@ -539,6 +585,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     // Dots live in the (terminal-colored) app bar, so colour them from the
     // terminal foreground; the toolbar provides the background.
     tabDots.setBaseColor(currentTerminalForegroundColor())
+    // Always one dot per REAL tab, with the real (mapped) index selected — the
+    // virtual looping positions must never leak into the indicator.
     tabDots.setTabs(tabCount, selectedTabIndex)
   }
 
@@ -947,7 +995,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     }
     val index = tabs.indexOfFirst { it is TermTab && it.termData.termSession == session }
     if (index >= 0) {
-      viewPager.setCurrentItem(index, false)
+      // Map the real index to a centered virtual position when looping.
+      viewPager.setCurrentItem(pagerAdapter.startPosition(index), false)
     }
   }
 
@@ -959,19 +1008,71 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     if (index >= 0) {
       // Animate to the newly added (or selected) page so the switch is visible
       // when it is not the immediate neighbour; ViewPager2 still snaps cleanly.
-      viewPager.setCurrentItem(index, true)
+      // In looping mode, animating across the whole virtual range would scroll
+      // thousands of pages, so step to the nearest virtual position of the
+      // target real tab instead (and only animate when it's a near neighbour).
+      val target = nearestVirtualPositionFor(index)
+      val animate = Math.abs(target - selectedVirtualIndex) <= 1
+      viewPager.setCurrentItem(target, animate)
     }
+  }
+
+  /**
+   * The virtual pager position for real-tab [realIndex] that is closest to the
+   * current position (so a switch never scrolls across the whole virtual range).
+   * In finite mode this is just [realIndex].
+   */
+  private fun nearestVirtualPositionFor(realIndex: Int): Int {
+    if (!pagerAdapter.isLooping) return realIndex
+    val realCount = pagerAdapter.realCount
+    val current = viewPager.currentItem
+    val currentReal = pagerAdapter.realIndex(current)
+    // Signed delta in [-(realCount-1) .. realCount-1] taking the shorter way
+    // around the ring.
+    var delta = realIndex - currentReal
+    if (delta > realCount / 2) delta -= realCount
+    if (delta < -realCount / 2) delta += realCount
+    return current + delta
   }
 
   /**
    * Append a tab to the model and notify the adapter. The page is created lazily
    * by ViewPager2; offscreenPageLimit keeps the neighbours live.
+   *
+   * Adding a tab can flip the adapter between finite and looping mode (e.g. the
+   * 2->3 transition turns looping ON, changing the item count from realCount to
+   * LOOP_COUNT). When the mode flips, a plain notifyItemInserted is wrong (the
+   * whole index space changed), so we rebuild and re-seat the current position.
    */
   private fun addNewTab(tab: NeoTab) {
+    val wasLooping = pagerAdapter.isLooping
+    // Remember which real tab is currently shown so we can keep it selected.
+    val currentReal = selectedTabIndex.coerceIn(0, (tabCount - 1).coerceAtLeast(0))
     tabs.add(tab)
-    pagerAdapter.notifyItemInserted(tabs.size - 1)
+    // In looping mode getItemCount() stays LOOP_COUNT but every position's real
+    // mapping shifts, so a positional notify would desync the adapter from its
+    // (unchanged) item count. A finite<->looping flip also rewrites the whole
+    // index space. In both cases rebuild + re-seat; only a pure finite insert is
+    // a simple notifyItemInserted.
+    if (pagerAdapter.isLooping || wasLooping) {
+      reseatPagerKeepingReal(currentReal)
+    } else {
+      pagerAdapter.notifyItemInserted(tabs.size - 1)
+    }
     update_colors()
     updateTabDots()
+  }
+
+  /**
+   * Rebuild the pager after a finite<->looping mode flip and place the pager on
+   * [realIndex]'s (centered, when looping) virtual position without animation.
+   * notifyDataSetChanged is used because the entire virtual index space changed
+   * meaning, not just one item.
+   */
+  private fun reseatPagerKeepingReal(realIndex: Int) {
+    pagerAdapter.notifyDataSetChanged()
+    val target = pagerAdapter.startPosition(realIndex.coerceIn(0, (tabCount - 1).coerceAtLeast(0)))
+    viewPager.setCurrentItem(target, false)
   }
 
   /**
@@ -992,7 +1093,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     }
 
     // Work out which neighbour to focus *before* removing the tab, honouring the
-    // next/previous preference (matches the old close behaviour).
+    // next/previous preference (matches the old close behaviour). This is a REAL
+    // index into [tabs].
     var target = index
     if (NeoPreference.isNextTabEnabled()) {
       if (--target < 0) target = tabCount - 1
@@ -1003,23 +1105,50 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
 
     removeTabAt(index)
 
-    // After removal the indices shifted; select the tab we picked by identity.
-    val newIndex = if (targetTab != null) indexOf(targetTab) else (index.coerceAtMost(tabCount - 1))
-    if (newIndex >= 0) {
-      viewPager.setCurrentItem(newIndex, false)
+    // After removal the indices shifted; select the tab we picked by identity,
+    // resolved to a (centered, when looping) virtual position. removeTabAt may
+    // have flipped looping off (3->2 tabs) and already re-seated the pager; in
+    // that case we still re-point at the intended real tab.
+    val newReal = if (targetTab != null) indexOf(targetTab)
+      else index.coerceAtMost(tabCount - 1)
+    if (newReal >= 0) {
+      viewPager.setCurrentItem(pagerAdapter.startPosition(newReal), false)
     }
     updateTabDots()
   }
 
-  /** Remove the tab at [index], cleaning up its underlying session. */
+  /**
+   * Remove the tab at real [index], cleaning up its underlying session.
+   *
+   * Removing can flip the adapter from looping to finite (the 3->2 transition).
+   * When it does, the virtual index space collapses to the real one, so we
+   * rebuild the pager (keeping whatever real tab is current) rather than emitting
+   * a plain notifyItemRemoved against an index space that no longer exists.
+   */
   private fun removeTabAt(index: Int) {
     val tab = tabs.getOrNull(index) ?: return
+    val wasLooping = pagerAdapter.isLooping
+    // The real tab that will remain selected (best-effort) after the removal, so
+    // a mode flip can re-seat onto it.
+    val currentReal = selectedTabIndex
     when (tab) {
       is TermTab -> SessionRemover.removeSession(termService, tab)
       is XSessionTab -> SessionRemover.removeXSession(termService, tab)
     }
     tabs.removeAt(index)
-    pagerAdapter.notifyItemRemoved(index)
+    // Mirror addNewTab: a positional notifyItemRemoved is only valid for a pure
+    // finite removal. In looping mode the item count stays LOOP_COUNT while every
+    // position's real mapping shifts, and a looping->finite flip (3->2 tabs)
+    // rewrites the whole index space — both need a rebuild + re-seat. Keep the
+    // current real tab (shifted left if it sat after the removed one); closeTab
+    // re-points to its chosen neighbour afterwards.
+    if (pagerAdapter.isLooping || wasLooping) {
+      val keepReal = (if (currentReal > index) currentReal - 1 else currentReal)
+        .coerceIn(0, (tabCount - 1).coerceAtLeast(0))
+      reseatPagerKeepingReal(keepReal)
+    } else {
+      pagerAdapter.notifyItemRemoved(index)
+    }
   }
 
   private fun getStoredCurrentSessionOrLast(): TerminalSession? {
@@ -1147,9 +1276,17 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       return
     }
 
-    val rangedInt = RangedInt(selectedTabIndex, (0 until tabCount))
-    val nextIndex = if (switchSessionEvent.toNext) rangedInt.inc() else rangedInt.dec()
-    viewPager.setCurrentItem(nextIndex, true)
+    // Step one position in the requested direction. In looping mode just move
+    // the virtual position by +/-1 (the pager wraps via the modulo mapping); in
+    // finite mode wrap the real index manually as before.
+    if (pagerAdapter.isLooping) {
+      val delta = if (switchSessionEvent.toNext) 1 else -1
+      viewPager.setCurrentItem(selectedVirtualIndex + delta, true)
+    } else {
+      val rangedInt = RangedInt(selectedTabIndex, (0 until tabCount))
+      val nextIndex = if (switchSessionEvent.toNext) rangedInt.inc() else rangedInt.dec()
+      viewPager.setCurrentItem(nextIndex, true)
+    }
   }
 
   @Suppress("unused", "UNUSED_PARAMETER")
@@ -1157,7 +1294,9 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   fun onSwitchIndexedSessionEvent(switchIndexedSessionEvent: SwitchIndexedSessionEvent) {
     val nextIndex = switchIndexedSessionEvent.index - 1
     if (nextIndex in (0 until tabCount) && nextIndex != selectedTabIndex) {
-      viewPager.setCurrentItem(nextIndex, true)
+      // [nextIndex] is a REAL tab index; resolve to the nearest virtual position
+      // when looping so we don't scroll across the whole virtual range.
+      viewPager.setCurrentItem(nearestVirtualPositionFor(nextIndex), true)
     }
   }
 
