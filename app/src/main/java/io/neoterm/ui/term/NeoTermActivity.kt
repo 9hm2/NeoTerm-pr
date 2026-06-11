@@ -473,17 +473,23 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     }
   }
 
+  private val remeasureRunnable = Runnable { (tabSwitcher.selectedTab as? TermTab)?.resetStatus() }
+
   /**
-   * Re-measure the active terminal across the next few frames so the emulator's
-   * row/column count always settles on the final visible size after keyboard or
-   * recents transitions. updateSize() is a no-op when the size hasn't changed, so
-   * the redundant passes are cheap and never cause extra SIGWINCH/redraws.
+   * Re-measure the active terminal once the layout settles, so the emulator's
+   * row/column count always matches the final visible size after keyboard or
+   * recents transitions (otherwise the terminal can be left shorter than the
+   * view, which the user would have to clear by toggling the keyboard).
+   *
+   * Debounced: any pending pass is cancelled and re-posted, so calling this on
+   * every inset/animation frame stays cheap. updateSize() is itself a no-op when
+   * the size hasn't changed, so it never causes a spurious SIGWINCH/redraw.
    */
   private fun scheduleTerminalRemeasure() {
     val view = (tabSwitcher.selectedTab as? TermTab)?.termData?.termView ?: return
-    for (delay in longArrayOf(0L, 120L, 320L)) {
-      view.postDelayed({ (tabSwitcher.selectedTab as? TermTab)?.resetStatus() }, delay)
-    }
+    view.removeCallbacks(remeasureRunnable)
+    view.postDelayed(remeasureRunnable, 120)
+    view.postDelayed(remeasureRunnable, 350)
   }
 
   fun raiseKeyboard(view: View) {
@@ -1036,6 +1042,12 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         insets.systemWindowInsetTop, insets.systemWindowInsetRight,
         insets.systemWindowInsetBottom
       )
+      // The bottom inset (keyboard) just changed the usable height — even small
+      // changes (suggestion bar, keyboard layout switches) that the keyboard
+      // show/hide listener's threshold misses. Re-measure once the new padding is
+      // laid out so the terminal always fills the visible area (no leftover gap
+      // that the user would otherwise have to clear by toggling the keyboard).
+      scheduleTerminalRemeasure()
       insets
     }
   }
