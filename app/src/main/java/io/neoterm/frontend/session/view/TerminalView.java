@@ -66,6 +66,11 @@ public final class TerminalView extends View {
   int mTopRow;
 
   boolean mIsSelectingText = false, mIsDraggingLeftSelection, mInitialTextSelection;
+  /** Per-gesture latch for the pager-vs-terminal touch decision: once a drag is
+   *  classified (horizontal -> let the ViewPager2 page; vertical -> terminal
+   *  scroll) we stick with it. Reset on ACTION_DOWN. */
+  private boolean mGestureDecided = false;
+  private boolean mGestureHorizontal = false;
   /** True while the current touch gesture is dragging a selection handle. */
   private boolean mIsDraggingHandle = false;
   int mSelX1 = -1, mSelX2 = -1, mSelY1 = -1, mSelY2 = -1;
@@ -229,13 +234,22 @@ public final class TerminalView extends View {
           return true;
         }
 
-        // A clearly-vertical scroll belongs to the terminal: ask the enclosing
-        // ViewPager2 not to steal the gesture so the swipe scrolls the transcript
-        // instead of paging tabs. (Horizontal drags are left for the pager.)
-        if (Math.abs(distanceY) >= Math.abs(distanceX)) {
-          disallowParentIntercept();
+        // Classify the drag once: a clearly-horizontal drag is handed to the
+        // enclosing ViewPager2 (page tabs); anything else (vertical) stays with
+        // the terminal. We already disallowed parent intercept on ACTION_DOWN, so
+        // long-press/selection/pinch are safe; here we only RELEASE to the pager
+        // for a horizontal drag.
+        if (!mGestureDecided) {
+          mGestureDecided = true;
+          mGestureHorizontal = Math.abs(distanceX) > Math.abs(distanceY);
+          if (mGestureHorizontal) allowParentIntercept();
+        }
+        if (mGestureHorizontal) {
+          // The pager owns this gesture now (it will intercept the next move).
+          return true;
         }
 
+        disallowParentIntercept();
         scrolledWithFinger = true;
         scrollByPixels(e, distanceY);
         return true;
@@ -733,6 +747,16 @@ public final class TerminalView extends View {
     if (mEmulator == null) return true;
     final int action = ev.getAction();
 
+    // Claim the gesture up front (touch only) so a long-press/selection/vertical
+    // scroll/pinch can't be stolen by the enclosing ViewPager2 on a tiny finger
+    // wobble. The first onScroll releases it back to the pager only for a
+    // clearly-horizontal drag (mGestureHorizontal).
+    if (action == MotionEvent.ACTION_DOWN && !ev.isFromSource(InputDevice.SOURCE_MOUSE)) {
+      mGestureDecided = false;
+      mGestureHorizontal = false;
+      disallowParentIntercept();
+    }
+
     if (mIsSelectingText) {
       // The whole gesture belongs to text selection / its scroll: keep the pager
       // from intercepting any part of it as a page swipe.
@@ -851,14 +875,15 @@ public final class TerminalView extends View {
    * pager is still free to page between live tabs.
    */
   private void disallowParentIntercept() {
-    // TODO(on-device): if a near-diagonal vertical scroll occasionally pages the
-    // tab instead of scrolling, the pager committed to a horizontal drag before
-    // our gesture detector reported onScroll. If so, tighten by disallowing
-    // intercept on ACTION_DOWN and only re-allowing it once a clearly-horizontal
-    // drag is detected. In practice the per-event disallow below is enough
-    // because ViewPager2's RecyclerView re-checks the flag each MOVE.
     ViewParent parent = getParent();
     if (parent != null) parent.requestDisallowInterceptTouchEvent(true);
+  }
+
+  /** Hand the gesture back to the enclosing ViewPager2 (used once a drag is
+   *  classified as a horizontal page swipe). */
+  private void allowParentIntercept() {
+    ViewParent parent = getParent();
+    if (parent != null) parent.requestDisallowInterceptTouchEvent(false);
   }
 
   /**
