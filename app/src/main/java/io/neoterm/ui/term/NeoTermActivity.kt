@@ -590,6 +590,21 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     raiseKeyboard(view)
   }
 
+  /**
+   * Focus the current page's terminal and raise the keyboard, EXPLICITLY. Needed
+   * after add/switch/close because ViewPager2 only fires onPageSelected when the
+   * position NUMBER changes — e.g. closing a tab where the surviving tab keeps the
+   * same position, or re-seating to a virtual position that equals the current
+   * one — so relying on the callback alone leaves the new tab unfocused and the
+   * keyboard closed. Posted so it runs after the page is laid out and bound.
+   */
+  private fun focusCurrentTab() {
+    viewPager.post {
+      pagerAdapter.rebindCurrent(viewPager.currentItem)
+      raiseKeyboardForSelectedTab()
+    }
+  }
+
   /** The current terminal background color (from the active color scheme). */
   private fun currentTerminalBackgroundColor(): Int {
     return try {
@@ -1033,6 +1048,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     if (index >= 0) {
       // Map the real index to a centered virtual position when looping.
       viewPager.setCurrentItem(pagerAdapter.startPosition(index), false)
+      focusCurrentTab()
     }
   }
 
@@ -1050,6 +1066,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       val target = nearestVirtualPositionFor(index)
       val animate = Math.abs(target - selectedVirtualIndex) <= 1
       viewPager.setCurrentItem(target, animate)
+      focusCurrentTab()
     }
   }
 
@@ -1154,6 +1171,9 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       viewPager.setCurrentItem(pagerAdapter.startPosition(newReal), false)
     }
     updateTabDots()
+    // onPageSelected won't fire if the surviving tab kept the same position
+    // number, so focus it + raise the keyboard explicitly.
+    focusCurrentTab()
   }
 
   /**
