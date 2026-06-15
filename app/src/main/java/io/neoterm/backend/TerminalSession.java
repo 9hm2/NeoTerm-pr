@@ -74,6 +74,15 @@ public class TerminalSession extends TerminalOutput {
   private static final int MSG_NEW_INPUT = 1;
   private static final int MSG_PROCESS_EXITED = 4;
 
+  /**
+   * Upper bound on how many bytes a single {@link #MSG_NEW_INPUT} turn drains and applies before
+   * yielding back to the main looper. Lets a normal full-screen frame (a few KB to tens of KB,
+   * which the 4 KB pipe splits across several reads) be applied atomically so it never paints
+   * half-updated, while still capping per-turn work so sustained output (e.g. {@code yes}) cannot
+   * starve input handling.
+   */
+  private static final int MAX_APPEND_BYTES_PER_TURN = 64 * 1024;
+
   public final String mHandle = UUID.randomUUID().toString();
 
   private TerminalEmulator mEmulator;
@@ -130,10 +139,25 @@ public class TerminalSession extends TerminalOutput {
     @Override
     public void handleMessage(Message msg) {
       if (msg.what == MSG_NEW_INPUT && isRunning()) {
-        int bytesRead = mProcessToTerminalIOQueue.read(mReceiveBuffer, false);
-        if (bytesRead > 0) {
+        // Apply all currently-buffered output in one turn, then repaint once. The 4 KB pipe
+        // splits a single large frame across several reads; repainting after every chunk lets a
+        // vsync onDraw land mid-frame and paint a half-updated screen (visible tearing). Bounded
+        // by MAX_APPEND_BYTES_PER_TURN so sustained output can't starve the main looper.
+        int appendedTotal = 0;
+        int bytesRead;
+        while (appendedTotal < MAX_APPEND_BYTES_PER_TURN
+          && (bytesRead = mProcessToTerminalIOQueue.read(mReceiveBuffer, false)) > 0) {
           mEmulator.append(mReceiveBuffer, bytesRead);
+          appendedTotal += bytesRead;
+        }
+        if (appendedTotal > 0) {
           notifyScreenUpdate();
+          // Stopped at the per-turn cap rather than an empty queue: more output may be buffered
+          // (or the writer is blocked on a full queue). Re-arm so the remainder is applied next
+          // turn, keeping the looper responsive in between.
+          if (appendedTotal >= MAX_APPEND_BYTES_PER_TURN) {
+            sendEmptyMessage(MSG_NEW_INPUT);
+          }
         }
       } else if (msg.what == MSG_PROCESS_EXITED) {
         int exitCode = (Integer) msg.obj;
