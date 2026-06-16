@@ -259,6 +259,12 @@ public final class TerminalView extends View {
 
   private void commonInit(Context context) {
     ensureFallbackTypeface(context);
+    // Don't draw the platform's default focus highlight: when the terminal gains focus in
+    // non-touch mode (e.g. right after an Enter key press, which switches the view tree out of
+    // touch mode), Android would otherwise overlay a translucent highlight across the whole view,
+    // making it look "lit up"/selected. The terminal draws its own cursor, so the system highlight
+    // is unwanted. (minSdk 26 -> setDefaultFocusHighlightEnabled is always available.)
+    setDefaultFocusHighlightEnabled(false);
     mGestureRecognizer = new GestureAndScaleRecognizer(context, new GestureAndScaleRecognizer.Listener() {
 
       private boolean scrolledWithFinger;
