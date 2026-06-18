@@ -352,6 +352,9 @@ object GpsBridge {
     if (loc.hasAccuracy()) {
       val acc = loc.accuracy.toDouble()
       putNum("eph", acc); putNum("epx", acc); putNum("epy", acc)
+      // Spherical (3D) error: horizontal combined with vertical.
+      val epv = if (loc.hasVerticalAccuracy()) loc.verticalAccuracyMeters.toDouble() else 0.0
+      putNum("sep", Math.sqrt(acc * acc + epv * epv))
     }
     if (loc.hasVerticalAccuracy()) putNum("epv", loc.verticalAccuracyMeters.toDouble())
     if (loc.hasSpeed()) putNum("speed", loc.speed.toDouble())
