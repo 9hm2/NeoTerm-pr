@@ -305,6 +305,14 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     ) {
       needed.add(Manifest.permission.RECORD_AUDIO)
     }
+    // CAMERA lets the CameraBridge serve the device camera as an MJPEG stream to apps in the
+    // distro. Only requested when the user enabled the camera in Settings.
+    if (NeoPreference.isCameraEnabled() &&
+      ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+      != PackageManager.PERMISSION_GRANTED
+    ) {
+      needed.add(Manifest.permission.CAMERA)
+    }
 
     if (needed.isEmpty()) {
       onStartupPermissionsHandled()
@@ -727,6 +735,13 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         if (micGranted) {
           io.neoterm.utils.PulseAudioBridge.restart(this)
         }
+        // Likewise start the camera bridge once CAMERA is granted (it couldn't open the camera
+        // at app start without the permission).
+        val cameraGranted = permissions.indexOf(Manifest.permission.CAMERA)
+          .let { it >= 0 && grantResults.getOrNull(it) == PackageManager.PERMISSION_GRANTED }
+        if (cameraGranted) {
+          io.neoterm.utils.CameraBridge.restart(this)
+        }
         // Storage/notifications are best-effort: the rootfs lives in internal
         // storage, so the app still works if they are declined. Proceed with
         // startup regardless of the result instead of killing the app.
@@ -760,6 +775,22 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
           )
         } else {
           io.neoterm.utils.PulseAudioBridge.restart(this)
+        }
+      }
+
+      getString(R.string.key_general_camera) -> {
+        // Toggle the camera: when enabling, ensure CAMERA is granted (the grant callback starts
+        // the bridge); otherwise restart now so the bridge starts/stops to match the setting.
+        if (NeoPreference.isCameraEnabled() &&
+          ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+          != PackageManager.PERMISSION_GRANTED
+        ) {
+          ActivityCompat.requestPermissions(
+            this, arrayOf(Manifest.permission.CAMERA),
+            NeoPermission.REQUEST_APP_PERMISSION
+          )
+        } else {
+          io.neoterm.utils.CameraBridge.restart(this)
         }
       }
 

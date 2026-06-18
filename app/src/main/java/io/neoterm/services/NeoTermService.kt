@@ -73,6 +73,9 @@ class NeoTermService : Service() {
       // Start the Android-side PulseAudio with the app, so terminal apps (not
       // just X11) can play audio via PULSE_SERVER=127.0.0.1:4713.
       io.neoterm.utils.PulseAudioBridge.start(this)
+      // Camera: when enabled (+ CAMERA granted), serve the device camera as an
+      // MJPEG stream on NEOTERM_CAMERA_URL for distro apps.
+      io.neoterm.utils.CameraBridge.start(this)
       // USB host: detect plug-in/out and request permission via a
       // BroadcastReceiver (no manifest device_filter), serving granted devices.
       io.neoterm.utils.UsbBridge.register(this)
@@ -111,6 +114,7 @@ class NeoTermService : Service() {
     }
     stopX11Server()
     io.neoterm.utils.PulseAudioBridge.stop()
+    io.neoterm.utils.CameraBridge.stop()
     io.neoterm.utils.UsbBridge.unregister(this)
 
     for (i in mTerminalSessions.indices)

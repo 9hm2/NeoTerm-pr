@@ -313,6 +313,13 @@ object NeoPreference {
     )
   }
 
+  fun isCameraEnabled(): Boolean {
+    return loadBoolean(
+      R.string.key_general_camera,
+      DefaultValues.enableCamera
+    )
+  }
+
   fun isOscNotificationEnabled(): Boolean {
     return loadBoolean(
       R.string.key_general_osc_notification,

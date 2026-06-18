@@ -225,6 +225,12 @@ object ProotManager {
     if (NeoPreference.isMicrophoneEnabled()) {
       args.add("PULSE_SOURCE=neoterm_mic")
     }
+    // Camera: NeoTerm's Android-side MJPEG bridge (CameraBridge). Only exported when the user
+    // enabled the camera in Settings — then the bridge serves the stream and CAMERA was
+    // requested. URL-aware apps (ffmpeg/OpenCV/mpv) read it; it is not a /dev/video0 device.
+    if (NeoPreference.isCameraEnabled()) {
+      args.add("NEOTERM_CAMERA_URL=http://127.0.0.1:4715/video.mjpeg")
+    }
     args.add("XDG_RUNTIME_DIR=/tmp")
     // Firefox's content sandbox can't work under proot (ptrace + no user
     // namespaces) and SIGSEGVs its child processes; disable it so the browser

@@ -25,6 +25,12 @@
   <!-- Microphone: lets the bundled PulseAudio's AAudio source capture the device
        mic so recording apps in the proot distro have audio input. -->
   <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+  <!-- Camera: lets the CameraBridge serve the device camera as an MJPEG stream
+       (NEOTERM_CAMERA_URL) to apps in the proot distro. -->
+  <uses-permission android:name="android.permission.CAMERA"/>
+  <uses-feature
+    android:name="android.hardware.camera.any"
+    android:required="false"/>
   <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
   <application

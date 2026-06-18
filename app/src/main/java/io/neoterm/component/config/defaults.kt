@@ -17,6 +17,7 @@ object DefaultValues {
   const val enableBackButtonBeMappedToEscape = false
   const val enableSpecialVolumeKeys = false
   const val enableMicrophone = false
+  const val enableCamera = false
   const val enableWordBasedIme = false
 
   // OSC-escape desktop notifications (OSC 9 / 99 kitty / 777 urxvt). Off by
