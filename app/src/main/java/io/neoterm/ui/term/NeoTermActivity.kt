@@ -372,6 +372,9 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       tabDots = dotsView
       updateTabDots()
     }
+    // The overflow icon only exists once the menu is created, so (re)apply the terminal
+    // colors here to tint it (and the title) to the terminal foreground.
+    applyTerminalSystemColors()
     return true
   }
 
@@ -647,7 +650,20 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
    */
   fun applyTerminalSystemColors() {
     val bg = currentTerminalBackgroundColor()
+    val fg = currentTerminalForegroundColor()
     toolbar.setBackgroundColor(bg)
+    // Title/subtitle text and the overflow (3-dot) icon follow the terminal foreground, so the
+    // app bar matches the terminal's fg-on-bg instead of the fixed white from the dark overlay.
+    toolbar.setTitleTextColor(fg)
+    toolbar.setSubtitleTextColor(fg)
+    toolbar.overflowIcon?.mutate()?.let {
+      it.setTint(fg)
+      toolbar.overflowIcon = it
+    }
+    toolbar.navigationIcon?.mutate()?.let {
+      it.setTint(fg)
+      toolbar.navigationIcon = it
+    }
     // Match the pager container too, so tab switches don't flash a different
     // color behind the terminal.
     viewPager.setBackgroundColor(bg)
