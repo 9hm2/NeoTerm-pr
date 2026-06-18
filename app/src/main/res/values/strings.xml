@@ -135,7 +135,7 @@
   <string name="pref_general_camera_resolution">Camera resolution</string>
   <string name="pref_general_camera_resolution_desc">Capture resolution for the camera stream. Lower means less latency and bandwidth; the closest size the camera supports is used.</string>
   <string name="pref_general_gps">GPS / Location</string>
-  <string name="pref_general_gps_desc">Expose the device GPS to the Linux distro as an NMEA stream for gpsd. Run: gpsd \"$NEOTERM_GPS_NMEA\" then use cgps/gpspipe/etc.</string>
+  <string name="pref_general_gps_desc">Built-in gpsd: serves the device GPS to the Linux distro on 127.0.0.1:2947 (gpsd protocol). No gpsd needed — just run cgps / gpspipe / gpsmon.</string>
   <string-array name="pref_general_camera_resolution_entries" translatable="false">
     <item>320x240</item>
     <item>640x480</item>

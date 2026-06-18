@@ -10,50 +10,48 @@ import android.location.LocationManager
 import android.location.OnNmeaMessageListener
 import android.os.Handler
 import android.os.HandlerThread
-import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import io.neoterm.component.config.NeoPreference
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.CopyOnWriteArraySet
-import kotlin.math.abs
 
 /**
- * Android-side GPS bridge: feeds the device's GNSS data to the distro as an NMEA 0183 stream that
- * gpsd consumes, the same way [PulseAudioBridge] exposes audio.
+ * Android-side GPS bridge that speaks the **gpsd client protocol** directly, so the distro's
+ * libgps clients (cgps, gpspipe, gpsmon, foxtrotgps, …) work with NO gpsd installed: it listens
+ * on the gpsd default 127.0.0.1:2947 and serves VERSION / DEVICES / WATCH / TPV / SKY / POLL JSON.
  *
- * A TCP server (app uid, holding ACCESS_FINE_LOCATION) emits NMEA on 127.0.0.1:[PORT]. In the
- * distro, point gpsd at it:
- *     gpsd "$NEOTERM_GPS_NMEA"      # = tcp://127.0.0.1:4716
- * then the usual clients (cgps, gpspipe, gpsmon, foxtrotgps, …) read gpsd on :2947.
+ * Position/velocity (TPV) is built from [Location] (lat/lon/alt, speed, track and the full set of
+ * gpsd error estimates epx/epy/epv/eps/epd); the sky view (SKY) from [GnssStatus] (per-satellite
+ * PRN/elevation/azimuth/SNR/used), enriched with real PDOP/HDOP/VDOP parsed from the chip's NMEA
+ * GSA sentence when available. GNSS is powered lazily, only while a client is connected.
  *
- * Completeness: we forward the GNSS chip's *raw* NMEA verbatim (via [OnNmeaMessageListener]) — all
- * sentence types (RMC/GGA/GSA/GSV/VTG/GST/ZDA), every constellation, real DOP/SNR. On devices that
- * don't deliver raw NMEA through the listener we fall back to synthesizing RMC/GGA/GSA/GSV from
- * [Location] + [GnssStatus] so gpsd still gets a full fix and sky view.
- *
- * GNSS is powered lazily — only while a client (gpsd) is connected — so location isn't sampled
- * when nothing reads it. Started with the app by NeoTermService (proot only).
+ * Started with the app by NeoTermService (proot only). Clients just run e.g. `cgps` — they default
+ * to localhost:2947.
  */
 object GpsBridge {
   private const val TAG = "GpsBridge"
-  private const val PORT = 4716
-  /** If no raw NMEA arrives within this window while we have a fix, synthesize it instead. */
-  private const val RAW_NMEA_GRACE_MS = 4000L
-  private const val SYNTH_INTERVAL_MS = 1000L
+  private const val PORT = 2947 // gpsd default client port
+  private const val DEVICE = "neoterm-gps"
 
   @Volatile private var running = false
   private var serverThread: Thread? = null
   private var serverSocket: ServerSocket? = null
   private var appContext: Context? = null
 
-  private val clients = CopyOnWriteArraySet<OutputStream>()
+  private val clients = CopyOnWriteArraySet<Client>()
 
-  // Location state (guarded by locationLock).
   private val locationLock = Any()
   private var locationThread: HandlerThread? = null
   private var locationHandler: Handler? = null
@@ -62,9 +60,17 @@ object GpsBridge {
   private var locationListener: LocationListener? = null
   private var gnssCallback: GnssStatus.Callback? = null
 
-  @Volatile private var lastRawNmeaAt = 0L
   @Volatile private var latestLocation: Location? = null
   @Volatile private var latestGnss: GnssStatus? = null
+  /** [pdop, hdop, vdop] parsed from the latest NMEA GSA sentence, or null. */
+  @Volatile private var dop: DoubleArray? = null
+
+  private val isoFmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+    .apply { timeZone = TimeZone.getTimeZone("UTC") }
+
+  private class Client(val socket: Socket, val out: OutputStream) {
+    @Volatile var watching = false
+  }
 
   fun start(context: Context) {
     if (running) return
@@ -74,7 +80,7 @@ object GpsBridge {
     ) return
     running = true
     appContext = context.applicationContext
-    serverThread = Thread({ serverLoop() }, "gps-bridge").apply { isDaemon = true; start() }
+    serverThread = Thread({ serverLoop() }, "gpsd-bridge").apply { isDaemon = true; start() }
   }
 
   fun stop() {
@@ -82,11 +88,11 @@ object GpsBridge {
     runCatching { serverSocket?.close() }
     serverSocket = null
     serverThread = null
+    for (c in clients) runCatching { c.socket.close() }
     clients.clear()
     stopLocation()
   }
 
-  /** Restart after the location permission is granted or the toggle changes. */
   fun restart(context: Context) {
     stop()
     start(context)
@@ -94,7 +100,7 @@ object GpsBridge {
 
   private fun serverLoop() {
     try {
-      ServerSocket(PORT, 4, InetAddress.getByName("127.0.0.1")).use { server ->
+      ServerSocket(PORT, 8, InetAddress.getByName("127.0.0.1")).use { server ->
         serverSocket = server
         while (running) {
           val client = try {
@@ -103,11 +109,12 @@ object GpsBridge {
             if (running) Log.w(TAG, "accept failed", e)
             break
           }
-          Thread({ handleClient(client) }, "gps-client").apply { isDaemon = true }.start()
+          Thread({ handleClient(client) }, "gpsd-client").apply { isDaemon = true }.start()
         }
       }
     } catch (e: Exception) {
-      Log.w(TAG, "gps server stopped", e)
+      // Most likely the port is taken (a real gpsd is already running). The bridge can't bind.
+      Log.w(TAG, "gpsd server stopped (port $PORT in use?)", e)
     } finally {
       serverSocket = null
     }
@@ -115,37 +122,60 @@ object GpsBridge {
 
   private fun handleClient(socket: Socket) {
     val out = try { socket.getOutputStream() } catch (e: Exception) { return }
-    clients.add(out)
+    val client = Client(socket, out)
+    clients.add(client)
     if (clients.size == 1) startLocation()
     try {
       runCatching { socket.tcpNoDelay = true }
-      // gpsd just reads the NMEA we push; block on the input until it disconnects.
-      val input = socket.getInputStream()
-      val buf = ByteArray(256)
+      // gpsd announces itself on connect.
+      send(client, versionJson())
+      send(client, devicesJson())
+      val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
       while (running && !socket.isClosed) {
-        val n = input.read(buf)
-        if (n < 0) break
+        val line = reader.readLine() ?: break
+        // A line may carry several ';'-separated commands.
+        for (raw in line.split(";")) handleCommand(client, raw.trim())
       }
     } catch (e: Exception) {
       // Client went away — normal.
     } finally {
-      clients.remove(out)
+      clients.remove(client)
       runCatching { socket.close() }
       if (clients.isEmpty()) stopLocation()
     }
   }
 
-  /** Send one NMEA sentence (without trailing newline) to every connected client. */
-  private fun broadcast(sentence: String) {
-    if (clients.isEmpty()) return
-    val bytes = (sentence + "\r\n").toByteArray()
-    for (out in clients) {
-      try {
-        synchronized(out) { out.write(bytes); out.flush() }
-      } catch (e: Exception) {
-        clients.remove(out)
+  private fun handleCommand(client: Client, cmd: String) {
+    if (cmd.isEmpty()) return
+    when {
+      cmd.startsWith("?WATCH") -> {
+        val enable = !cmd.contains("\"enable\":false")
+        client.watching = enable
+        send(client, watchJson(enable))
+        send(client, devicesJson())
+        if (enable) {
+          latestLocation?.let { send(client, tpvJson(it)) }
+          send(client, skyJson(latestGnss))
+        }
       }
+      cmd.startsWith("?POLL") -> send(client, pollJson())
+      cmd.startsWith("?VERSION") -> send(client, versionJson())
+      cmd.startsWith("?DEVICES") -> send(client, devicesJson())
     }
+  }
+
+  private fun send(client: Client, obj: JSONObject) {
+    try {
+      val bytes = (obj.toString() + "\r\n").toByteArray()
+      synchronized(client.out) { client.out.write(bytes); client.out.flush() }
+    } catch (e: Exception) {
+      clients.remove(client)
+      runCatching { client.socket.close() }
+    }
+  }
+
+  private fun broadcast(obj: JSONObject) {
+    for (c in clients) if (c.watching) send(c, obj)
   }
 
   // ---- Location / NMEA sources ----
@@ -165,41 +195,29 @@ object GpsBridge {
         locationThread = thread
         locationHandler = handler
 
-        // Raw NMEA straight from the GNSS chip — the most complete source.
-        val nmea = OnNmeaMessageListener { message, _ ->
-          if (message != null) {
-            lastRawNmeaAt = SystemClock.elapsedRealtime()
-            broadcast(message.trim().trimEnd('\r', '\n'))
-          }
+        val listener = LocationListener { loc ->
+          latestLocation = loc
+          broadcast(tpvJson(loc))
         }
-        nmeaListener = nmea
-        lm.addNmeaListener(nmea, handler)
+        locationListener = listener
 
-        // Satellite status, used for the synthesized GSV/GSA fallback.
         val gnss = object : GnssStatus.Callback() {
           override fun onSatelliteStatusChanged(status: GnssStatus) {
             latestGnss = status
+            broadcast(skyJson(status))
           }
         }
         gnssCallback = gnss
         lm.registerGnssStatusCallback(gnss, handler)
 
-        // Power the GNSS engine.
-        val listener = LocationListener { loc -> latestLocation = loc }
-        locationListener = listener
+        // Raw NMEA only to mine real PDOP/HDOP/VDOP out of the GSA sentence.
+        val nmea = OnNmeaMessageListener { message, _ -> if (message != null) parseGsaDop(message) }
+        nmeaListener = nmea
+        lm.addNmeaListener(nmea, handler)
+
         if (lm.allProviders.contains(LocationManager.GPS_PROVIDER)) {
           lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, listener, thread.looper)
         }
-
-        // Synthesized-NMEA fallback loop (only emits when raw NMEA isn't flowing).
-        handler.postDelayed(object : Runnable {
-          override fun run() {
-            if (!locationStarted) return
-            emitSynthIfNeeded()
-            locationHandler?.postDelayed(this, SYNTH_INTERVAL_MS)
-          }
-        }, SYNTH_INTERVAL_MS)
-
         locationStarted = true
       } catch (e: Exception) {
         Log.w(TAG, "startLocation failed", e)
@@ -228,144 +246,139 @@ object GpsBridge {
       locationStarted = false
       latestLocation = null
       latestGnss = null
-      lastRawNmeaAt = 0L
+      dop = null
     }
   }
 
-  /** When the chip doesn't deliver raw NMEA, build it from Location + GnssStatus. */
-  private fun emitSynthIfNeeded() {
-    if (clients.isEmpty()) return
-    // Raw NMEA is flowing — don't duplicate it.
-    if (lastRawNmeaAt != 0L && SystemClock.elapsedRealtime() - lastRawNmeaAt < RAW_NMEA_GRACE_MS) return
-    val loc = latestLocation ?: return
-    NmeaSynth.build(loc, latestGnss).forEach { broadcast(it) }
-  }
-}
-
-/** Builds standard NMEA 0183 sentences from an Android [Location] (+ optional [GnssStatus]). */
-private object NmeaSynth {
-  fun build(loc: Location, gnss: GnssStatus?): List<String> {
-    val out = ArrayList<String>(8)
-    val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
-    cal.timeInMillis = if (loc.time > 0) loc.time else System.currentTimeMillis()
-    val hh = cal.get(java.util.Calendar.HOUR_OF_DAY)
-    val mm = cal.get(java.util.Calendar.MINUTE)
-    val ss = cal.get(java.util.Calendar.SECOND)
-    val time = String.format(Locale.US, "%02d%02d%02d.00", hh, mm, ss)
-    val date = String.format(
-      Locale.US, "%02d%02d%02d",
-      cal.get(java.util.Calendar.DAY_OF_MONTH),
-      cal.get(java.util.Calendar.MONTH) + 1,
-      cal.get(java.util.Calendar.YEAR) % 100
-    )
-
-    val lat = coord(abs(loc.latitude), true)
-    val latH = if (loc.latitude >= 0) "N" else "S"
-    val lon = coord(abs(loc.longitude), false)
-    val lonH = if (loc.longitude >= 0) "E" else "W"
-
-    val speedKnots = loc.speed * 1.943844f // m/s -> knots
-    val course = loc.bearing
-    val alt = if (loc.hasAltitude()) loc.altitude else 0.0
-    val sats = gnss?.let { used(it) } ?: 0
-
-    // RMC: time, status, lat, lon, SOG (knots), COG, date.
-    out += nmea(
-      String.format(
-        Locale.US, "GPRMC,%s,A,%s,%s,%s,%s,%.1f,%.1f,%s,,,A",
-        time, lat, latH, lon, lonH, speedKnots, course, date
-      )
-    )
-    // GGA: time, lat, lon, fix quality(1), num sats, HDOP, altitude(M), geoid sep.
-    out += nmea(
-      String.format(
-        Locale.US, "GPGGA,%s,%s,%s,%s,%s,1,%02d,%s,%.1f,M,0.0,M,,",
-        time, lat, latH, lon, lonH, sats, hdop(loc), alt
-      )
-    )
-    // GSA: auto mode, 3D fix, used PRNs, PDOP/HDOP/VDOP (left blank — gpsd derives them).
-    gnss?.let { out += buildGsa(it) }
-    // GSV: satellites in view, grouped per constellation talker.
-    gnss?.let { out.addAll(buildGsv(it)) }
-    return out
-  }
-
-  private fun coord(value: Double, isLat: Boolean): String {
-    val deg = value.toInt()
-    val min = (value - deg) * 60.0
-    return if (isLat) String.format(Locale.US, "%02d%07.4f", deg, min)
-    else String.format(Locale.US, "%03d%07.4f", deg, min)
-  }
-
-  private fun hdop(loc: Location): String {
-    // Rough HDOP proxy from horizontal accuracy; gpsd also has GGA's value.
-    return if (loc.hasAccuracy()) String.format(Locale.US, "%.1f", (loc.accuracy / 5f).coerceIn(0.5f, 99.9f))
-    else "1.0"
-  }
-
-  private fun used(gnss: GnssStatus): Int {
-    var c = 0
-    for (i in 0 until gnss.satelliteCount) if (gnss.usedInFix(i)) c++
-    return c
-  }
-
-  private fun buildGsa(gnss: GnssStatus): String {
-    val prns = ArrayList<Int>()
-    for (i in 0 until gnss.satelliteCount) if (gnss.usedInFix(i)) prns.add(gnss.getSvid(i))
-    val fields = StringBuilder("GPGSA,A,3")
-    for (k in 0 until 12) fields.append(",").append(if (k < prns.size) prns[k].toString() else "")
-    fields.append(",,,") // PDOP,HDOP,VDOP left empty
-    return nmea(fields.toString())
-  }
-
-  private fun buildGsv(gnss: GnssStatus): List<String> {
-    // Group satellites by constellation -> talker id, 4 sats per GSV sentence.
-    val byTalker = HashMap<String, MutableList<Int>>()
-    for (i in 0 until gnss.satelliteCount) {
-      val talker = talkerFor(gnss.getConstellationType(i))
-      byTalker.getOrPut(talker) { ArrayList() }.add(i)
+  private fun parseGsaDop(sentence: String) {
+    try {
+      val body = sentence.substringAfter('$', "").substringBefore('*')
+      val t = body.split(",")
+      if (t.isNotEmpty() && t[0].endsWith("GSA") && t.size >= 18) {
+        val p = t[15].toDoubleOrNull()
+        val h = t[16].toDoubleOrNull()
+        val v = t[17].toDoubleOrNull()
+        if (p != null && h != null && v != null) dop = doubleArrayOf(p, h, v)
+      }
+    } catch (e: Exception) {
+      // ignore malformed
     }
-    val out = ArrayList<String>()
-    for ((talker, idx) in byTalker) {
-      val total = idx.size
-      val sentences = (total + 3) / 4
-      for (s in 0 until sentences) {
-        val sb = StringBuilder()
-        sb.append(talker).append("GSV,").append(sentences).append(",").append(s + 1).append(",")
-          .append(String.format(Locale.US, "%02d", total))
-        for (k in 0 until 4) {
-          val n = s * 4 + k
-          if (n < total) {
-            val i = idx[n]
-            sb.append(",").append(gnss.getSvid(i))
-              .append(",").append(gnss.getElevationDegrees(i).toInt())
-              .append(",").append(((gnss.getAzimuthDegrees(i).toInt() % 360 + 360) % 360))
-              .append(",").append(gnss.getCn0DbHz(i).toInt())
-          } else {
-            sb.append(",,,,")
-          }
-        }
-        out += nmea(sb.toString())
+  }
+
+  // ---- gpsd JSON reports ----
+
+  private fun iso(t: Long): String = synchronized(isoFmt) {
+    isoFmt.format(Date(if (t > 0) t else System.currentTimeMillis()))
+  }
+
+  private fun JSONObject.putNum(key: String, v: Double) {
+    if (!v.isNaN() && !v.isInfinite()) put(key, v)
+  }
+
+  private fun versionJson(): JSONObject = JSONObject().apply {
+    put("class", "VERSION")
+    put("release", "3.25")
+    put("rev", "neoterm")
+    put("proto_major", 3)
+    put("proto_minor", 14)
+  }
+
+  private fun deviceJson(): JSONObject = JSONObject().apply {
+    put("class", "DEVICE")
+    put("path", DEVICE)
+    put("driver", "NMEA0183")
+    put("activated", iso(0))
+    put("flags", 1)
+    put("native", 0)
+    put("cycle", 1.0)
+  }
+
+  private fun devicesJson(): JSONObject = JSONObject().apply {
+    put("class", "DEVICES")
+    put("devices", JSONArray().put(deviceJson()))
+  }
+
+  private fun watchJson(enable: Boolean): JSONObject = JSONObject().apply {
+    put("class", "WATCH")
+    put("enable", enable)
+    put("json", true)
+    put("nmea", false)
+    put("raw", 0)
+    put("scaled", false)
+    put("timing", false)
+    put("split24", false)
+    put("pps", false)
+    put("device", DEVICE)
+  }
+
+  private fun tpvJson(loc: Location): JSONObject = JSONObject().apply {
+    put("class", "TPV")
+    put("device", DEVICE)
+    put("mode", if (loc.hasAltitude()) 3 else 2)
+    put("time", iso(loc.time))
+    put("ept", 0.005)
+    putNum("lat", loc.latitude)
+    putNum("lon", loc.longitude)
+    if (loc.hasAltitude()) {
+      putNum("altHAE", loc.altitude)
+      putNum("alt", loc.altitude)
+    }
+    if (loc.hasAccuracy()) {
+      val acc = loc.accuracy.toDouble()
+      putNum("eph", acc); putNum("epx", acc); putNum("epy", acc)
+    }
+    if (loc.hasVerticalAccuracy()) putNum("epv", loc.verticalAccuracyMeters.toDouble())
+    if (loc.hasSpeed()) putNum("speed", loc.speed.toDouble())
+    if (loc.hasSpeedAccuracy()) putNum("eps", loc.speedAccuracyMetersPerSecond.toDouble())
+    if (loc.hasBearing()) putNum("track", loc.bearing.toDouble())
+    if (loc.hasBearingAccuracy()) putNum("epd", loc.bearingAccuracyDegrees.toDouble())
+  }
+
+  private fun skyJson(gnss: GnssStatus?): JSONObject = JSONObject().apply {
+    put("class", "SKY")
+    put("device", DEVICE)
+    latestLocation?.let { put("time", iso(it.time)) }
+    dop?.let { putNum("pdop", it[0]); putNum("hdop", it[1]); putNum("vdop", it[2]) }
+    val arr = JSONArray()
+    var used = 0
+    if (gnss != null) {
+      for (i in 0 until gnss.satelliteCount) {
+        val inFix = gnss.usedInFix(i)
+        if (inFix) used++
+        arr.put(JSONObject().apply {
+          put("PRN", gnss.getSvid(i))
+          put("svid", gnss.getSvid(i))
+          put("gnssid", gnssIdFor(gnss.getConstellationType(i)))
+          putNum("el", gnss.getElevationDegrees(i).toDouble())
+          putNum("az", gnss.getAzimuthDegrees(i).toDouble())
+          putNum("ss", gnss.getCn0DbHz(i).toDouble())
+          put("used", inFix)
+        })
       }
     }
-    return out
+    put("nSat", arr.length())
+    put("uSat", used)
+    put("satellites", arr)
   }
 
-  private fun talkerFor(constellation: Int): String = when (constellation) {
-    GnssStatus.CONSTELLATION_GPS -> "GP"
-    GnssStatus.CONSTELLATION_GLONASS -> "GL"
-    GnssStatus.CONSTELLATION_GALILEO -> "GA"
-    GnssStatus.CONSTELLATION_BEIDOU -> "GB"
-    GnssStatus.CONSTELLATION_QZSS -> "GQ"
-    GnssStatus.CONSTELLATION_IRNSS -> "GI"
-    GnssStatus.CONSTELLATION_SBAS -> "GP"
-    else -> "GP"
+  private fun pollJson(): JSONObject = JSONObject().apply {
+    put("class", "POLL")
+    put("time", iso(0))
+    val loc = latestLocation
+    put("active", if (loc != null) 1 else 0)
+    put("tpv", JSONArray().apply { loc?.let { put(tpvJson(it)) } })
+    put("sky", JSONArray().put(skyJson(latestGnss)))
   }
 
-  /** Wrap a sentence body in `$...*CS` with the NMEA XOR checksum. */
-  private fun nmea(body: String): String {
-    var c = 0
-    for (ch in body) c = c xor ch.code
-    return String.format(Locale.US, "\$%s*%02X", body, c)
+  /** Map an Android constellation to the gpsd/u-blox gnssid. */
+  private fun gnssIdFor(constellation: Int): Int = when (constellation) {
+    GnssStatus.CONSTELLATION_GPS -> 0
+    GnssStatus.CONSTELLATION_SBAS -> 1
+    GnssStatus.CONSTELLATION_GALILEO -> 2
+    GnssStatus.CONSTELLATION_BEIDOU -> 3
+    GnssStatus.CONSTELLATION_QZSS -> 5
+    GnssStatus.CONSTELLATION_GLONASS -> 6
+    GnssStatus.CONSTELLATION_IRNSS -> 7
+    else -> 0
   }
 }

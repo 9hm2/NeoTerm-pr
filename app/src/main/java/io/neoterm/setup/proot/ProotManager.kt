@@ -231,10 +231,11 @@ object ProotManager {
     if (NeoPreference.isCameraEnabled()) {
       args.add("NEOTERM_CAMERA_URL=http://127.0.0.1:4715/video.mjpeg")
     }
-    // GPS: NeoTerm's Android-side NMEA bridge (GpsBridge). Point gpsd at it:
-    // `gpsd "$NEOTERM_GPS_NMEA"`. Only exported when GPS is enabled in Settings.
+    // GPS: NeoTerm provides a built-in gpsd on 127.0.0.1:2947 (GpsBridge speaks the gpsd client
+    // protocol), so distro clients (cgps, gpspipe, …) work with no gpsd installed — they default
+    // to localhost:2947, no env needed. Export a hint for scripts when enabled.
     if (NeoPreference.isGpsEnabled()) {
-      args.add("NEOTERM_GPS_NMEA=tcp://127.0.0.1:4716")
+      args.add("NEOTERM_GPSD=127.0.0.1:2947")
     }
     args.add("XDG_RUNTIME_DIR=/tmp")
     // Firefox's content sandbox can't work under proot (ptrace + no user
