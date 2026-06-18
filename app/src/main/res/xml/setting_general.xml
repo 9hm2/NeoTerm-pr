@@ -49,6 +49,15 @@
     android:summary="@string/pref_general_camera_desc"
     android:title="@string/pref_general_camera"/>
 
+  <ListPreference
+    android:defaultValue="1280x720"
+    android:dependency="@string/key_general_camera"
+    android:entries="@array/pref_general_camera_resolution_entries"
+    android:entryValues="@array/pref_general_camera_resolution_values"
+    android:key="@string/key_general_camera_resolution"
+    android:summary="@string/pref_general_camera_resolution_desc"
+    android:title="@string/pref_general_camera_resolution"/>
+
   <CheckBoxPreference
     android:defaultValue="false"
     android:key="@string/key_general_enable_word_based_ime"

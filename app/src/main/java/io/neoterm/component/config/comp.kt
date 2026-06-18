@@ -320,6 +320,12 @@ object NeoPreference {
     )
   }
 
+  /** Requested camera capture resolution as "WIDTHxHEIGHT"; the bridge maps it to the closest
+   *  size the camera actually supports. */
+  fun getCameraResolution(): String {
+    return loadString(R.string.key_general_camera_resolution, DefaultValues.cameraResolution)
+  }
+
   fun isOscNotificationEnabled(): Boolean {
     return loadBoolean(
       R.string.key_general_osc_notification,

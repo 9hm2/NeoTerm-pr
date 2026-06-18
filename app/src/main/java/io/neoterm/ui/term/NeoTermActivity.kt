@@ -794,6 +794,11 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         }
       }
 
+      getString(R.string.key_general_camera_resolution) -> {
+        // Re-open the camera at the new resolution (no-op if the camera is off).
+        io.neoterm.utils.CameraBridge.restart(this)
+      }
+
       getString(R.string.key_ui_eks_enabled) -> {
         // Show/hide the extra keys on the open tabs immediately.
         val enabled = NeoPreference.isExtraKeysEnabled()

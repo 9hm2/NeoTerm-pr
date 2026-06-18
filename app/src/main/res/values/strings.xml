@@ -132,6 +132,20 @@
   <string name="pref_general_microphone_desc">Let apps in the Linux distro use the device microphone (PulseAudio source)</string>
   <string name="pref_general_camera">Camera</string>
   <string name="pref_general_camera_desc">Let apps in the Linux distro use the device camera as an MJPEG stream (NEOTERM_CAMERA_URL). Works with URL-aware apps (ffmpeg, OpenCV, mpv); not a /dev/video0 device.</string>
+  <string name="pref_general_camera_resolution">Camera resolution</string>
+  <string name="pref_general_camera_resolution_desc">Capture resolution for the camera stream. Lower means less latency and bandwidth; the closest size the camera supports is used.</string>
+  <string-array name="pref_general_camera_resolution_entries" translatable="false">
+    <item>320x240</item>
+    <item>640x480</item>
+    <item>1280x720</item>
+    <item>1920x1080</item>
+  </string-array>
+  <string-array name="pref_general_camera_resolution_values" translatable="false">
+    <item>320x240</item>
+    <item>640x480</item>
+    <item>1280x720</item>
+    <item>1920x1080</item>
+  </string-array>
   <string name="pref_general_use_execve_wrapper">Use execve() wrapper</string>
   <string name="pref_general_use_execve_wrapper_desc">Hook execve() to avoid incorrect shebang</string>
   <string name="pref_general_enable_word_based_ime">Enable word based IME</string>

@@ -288,19 +288,32 @@ object CameraBridge {
   }
 
   private fun chooseSize(cm: CameraManager, camId: String): Pair<Int, Int> {
+    val (tw, th) = requestedSize()
     return try {
       val map = cm.getCameraCharacteristics(camId)
         .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
       val sizes = map?.getOutputSizes(ImageFormat.YUV_420_888)
       if (sizes.isNullOrEmpty()) {
-        TARGET_W to TARGET_H
+        tw to th
       } else {
-        // Largest size that fits within the target box, else the smallest available.
-        sizes.filter { it.width <= TARGET_W && it.height <= TARGET_H }
-          .maxByOrNull { it.width * it.height }
-          ?.let { it.width to it.height }
-          ?: sizes.minByOrNull { it.width * it.height }!!.let { it.width to it.height }
+        // The size whose pixel count is closest to the requested one (devices rarely support
+        // every exact size, so snap to the nearest supported).
+        val target = tw.toLong() * th
+        val best = sizes.minByOrNull { Math.abs(it.width.toLong() * it.height - target) }!!
+        best.width to best.height
       }
+    } catch (e: Exception) {
+      tw to th
+    }
+  }
+
+  /** The user-requested capture size ("WxH" from Settings), defaulting to the target box. */
+  private fun requestedSize(): Pair<Int, Int> {
+    return try {
+      val parts = NeoPreference.getCameraResolution().split("x")
+      val w = parts[0].trim().toInt()
+      val h = parts[1].trim().toInt()
+      if (w >= 2 && h >= 2) w to h else TARGET_W to TARGET_H
     } catch (e: Exception) {
       TARGET_W to TARGET_H
     }
