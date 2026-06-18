@@ -346,17 +346,41 @@ object GpsBridge {
     val arr = JSONArray()
     var used = 0
     if (gnss != null) {
+      // Android reports one entry per satellite *signal*, so a sat tracked on multiple bands
+      // (e.g. L1+L5) appears 2-3 times. Collapse to one entry per physical satellite
+      // (constellation+svid), keeping the strongest signal and "used" if any signal was used —
+      // otherwise the Seen/Used counts are inflated and the sky list shows duplicates.
+      val merged = LinkedHashMap<Long, IntArray>() // key -> [gnssid, svid, used(0/1)]
+      val elOf = LinkedHashMap<Long, Float>()
+      val azOf = LinkedHashMap<Long, Float>()
+      val ssOf = LinkedHashMap<Long, Float>()
       for (i in 0 until gnss.satelliteCount) {
-        val inFix = gnss.usedInFix(i)
-        if (inFix) used++
+        val c = gnss.getConstellationType(i)
+        val svid = gnss.getSvid(i)
+        val key = (c.toLong() shl 32) or (svid.toLong() and 0xffffffffL)
+        val ss = gnss.getCn0DbHz(i)
+        val u = if (gnss.usedInFix(i)) 1 else 0
+        val cur = merged[key]
+        if (cur == null) {
+          merged[key] = intArrayOf(gnssIdFor(c), svid, u)
+          elOf[key] = gnss.getElevationDegrees(i)
+          azOf[key] = gnss.getAzimuthDegrees(i)
+          ssOf[key] = ss
+        } else {
+          if (u == 1) cur[2] = 1
+          if (ss > (ssOf[key] ?: 0f)) ssOf[key] = ss
+        }
+      }
+      for ((key, v) in merged) {
+        if (v[2] == 1) used++
         arr.put(JSONObject().apply {
-          put("PRN", gnss.getSvid(i))
-          put("svid", gnss.getSvid(i))
-          put("gnssid", gnssIdFor(gnss.getConstellationType(i)))
-          putNum("el", gnss.getElevationDegrees(i).toDouble())
-          putNum("az", gnss.getAzimuthDegrees(i).toDouble())
-          putNum("ss", gnss.getCn0DbHz(i).toDouble())
-          put("used", inFix)
+          put("PRN", v[1])
+          put("svid", v[1])
+          put("gnssid", v[0])
+          putNum("el", (elOf[key] ?: 0f).toDouble())
+          putNum("az", (azOf[key] ?: 0f).toDouble())
+          putNum("ss", (ssOf[key] ?: 0f).toDouble())
+          put("used", v[2] == 1)
         })
       }
     }
