@@ -154,6 +154,7 @@ final class TerminalRenderer {
       long lastRunStyle = 0;
       boolean lastRunInsideCursor = false;
       boolean lastRunUrl = false;
+      int lastRunUnderlineColor = 0;
       int lastRunStartColumn = -1;
       int lastRunStartIndex = 0;
       boolean lastRunFontWidthMismatch = false;
@@ -175,6 +176,7 @@ final class TerminalRenderer {
         final boolean insideCursor = (column >= selx1 && column <= selx2) || (cursorX == column || (codePointWcWidth == 2 && cursorX == column + 1));
         final boolean insideUrl = rowUrlMask != null && column < rowUrlMask.length && rowUrlMask[column];
         final long style = lineObject.getStyle(column);
+        final int underlineColor = lineObject.getUnderlineColor(column);
 
         // Check if the measured text width for this code point is not the same as that expected by wcwidth().
         // This could happen for some fonts which are not truly monospace, or for more exotic characters such as
@@ -193,7 +195,7 @@ final class TerminalRenderer {
           : mTextPaint.measureText(line, currentCharIndex, charsForCodePoint);
         final boolean fontWidthMismatch = Math.abs(measuredCodePointWidth / mFontWidth - codePointWcWidth) > 0.01;
 
-        if (style != lastRunStyle || insideCursor != lastRunInsideCursor || insideUrl != lastRunUrl || fontWidthMismatch || lastRunFontWidthMismatch || missingGlyph != lastRunMissingGlyph) {
+        if (style != lastRunStyle || insideCursor != lastRunInsideCursor || insideUrl != lastRunUrl || underlineColor != lastRunUnderlineColor || fontWidthMismatch || lastRunFontWidthMismatch || missingGlyph != lastRunMissingGlyph) {
           if (column == 0) {
             // Skip first column as there is nothing to draw, just record the current style.
           } else {
@@ -202,12 +204,13 @@ final class TerminalRenderer {
             int cursorColor = lastRunInsideCursor ? mEmulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] : 0;
             drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun,
               lastRunStartIndex, charsSinceLastRun, measuredWidthForRun,
-              cursorColor, cursorShape, lastRunStyle, reverseVideo, lastRunUrl, lastRunMissingGlyph);
+              cursorColor, cursorShape, lastRunStyle, reverseVideo, lastRunUrl, lastRunMissingGlyph, lastRunUnderlineColor);
           }
           measuredWidthForRun = 0.f;
           lastRunStyle = style;
           lastRunInsideCursor = insideCursor;
           lastRunUrl = insideUrl;
+          lastRunUnderlineColor = underlineColor;
           lastRunStartColumn = column;
           lastRunStartIndex = currentCharIndex;
           lastRunFontWidthMismatch = fontWidthMismatch;
@@ -227,7 +230,7 @@ final class TerminalRenderer {
       final int charsSinceLastRun = currentCharIndex - lastRunStartIndex;
       int cursorColor = lastRunInsideCursor ? mEmulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] : 0;
       drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun, lastRunStartIndex, charsSinceLastRun,
-        measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo, lastRunUrl, lastRunMissingGlyph);
+        measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo, lastRunUrl, lastRunMissingGlyph, lastRunUnderlineColor);
 
       // Inline image (Sixel) cells: drawTextRun skips them, so draw their bitmap
       // tiles here over the (blank) cells. Only when images exist on screen.
@@ -395,7 +398,8 @@ final class TerminalRenderer {
 
   private void drawTextRun(Canvas canvas, char[] text, int[] palette, float y, int startColumn, int runWidthColumns,
                            int startCharIndex, int runWidthChars, float mes, int cursor, int cursorStyle,
-                           long textStyle, boolean reverseVideo, boolean forceUnderline, boolean fallbackFont) {
+                           long textStyle, boolean reverseVideo, boolean forceUnderline, boolean fallbackFont,
+                           int underlineColor) {
     // Inline image cells are drawn separately (drawImageCells); skip them here so
     // their packed image id isn't misread as colours.
     if (TextStyle.isImage(textStyle)) return;
@@ -502,10 +506,11 @@ final class TerminalRenderer {
         foreColor = 0xFF000000 + (red << 16) + (green << 8) + blue;
       }
 
-      // Plain single underline is drawn by Paint; double/curly/dotted/dashed are drawn manually
-      // below (forceUnderline, e.g. for URLs, has no style and stays a single line).
+      // Plain single underline in the text colour is drawn by Paint; a non-single shape OR a
+      // distinct underline colour (SGR 58) is drawn manually below, since Paint's built-in
+      // underline can only use the text colour. (forceUnderline, e.g. URLs, stays single.)
       final int underlineStyle = underline ? TextStyle.decodeUnderlineStyle(textStyle) : 0;
-      final boolean customUnderline = underlineStyle >= TextStyle.UNDERLINE_DOUBLE;
+      final boolean customUnderline = underline && (underlineStyle >= TextStyle.UNDERLINE_DOUBLE || underlineColor != 0);
 
       mTextPaint.setFakeBoldText(bold);
       mTextPaint.setUnderlineText(underline && !customUnderline);
@@ -518,7 +523,11 @@ final class TerminalRenderer {
       // it is reset even for invisible runs.
       canvas.drawText(text, startCharIndex, runWidthChars, left, y - mFontLineSpacingAndAscent, mTextPaint);
 
-      if (customUnderline) drawExtendedUnderline(canvas, left, right, y, foreColor, underlineStyle);
+      if (customUnderline) {
+        int ulColor = underlineColor != 0 ? underlineColor : foreColor;
+        drawExtendedUnderline(canvas, left, right, y, ulColor,
+          underlineStyle == 0 ? TextStyle.UNDERLINE_SINGLE : underlineStyle);
+      }
     }
 
     if (fallbackFont) mTextPaint.setTypeface(mTypeface);

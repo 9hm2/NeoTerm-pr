@@ -43,6 +43,12 @@ public final class TerminalRow {
   private String[] mHyperlink;
 
   /**
+   * Per-column underline colour (ARGB; 0 = none, so the underline uses the text colour). Lazily
+   * allocated like {@link #mHyperlink}; set from SGR 58 and cleared (to 0) when a cell is rewritten.
+   */
+  private int[] mUnderlineColor;
+
+  /**
    * Construct a blank row (containing only whitespace, ' ') with a specified style.
    */
   public TerminalRow(int columns, long style) {
@@ -81,6 +87,8 @@ public final class TerminalRow {
       // (so OSC 8 hyperlinks survive scrolling/insert).
       String link = line.getHyperlink(sourceX1);
       if (link != null) setHyperlink(destinationX, link);
+      int ucolor = line.getUnderlineColor(sourceX1);
+      if (ucolor != 0) setUnderlineColor(destinationX, ucolor);
     }
   }
 
@@ -149,6 +157,23 @@ public final class TerminalRow {
     mSpaceUsed = (short) mColumns;
     mHasNonOneWidthOrSurrogateChars = false;
     mHyperlink = null;
+    mUnderlineColor = null;
+  }
+
+  /** Underline colour (ARGB) at the given column, or 0 if none (use the text colour). */
+  public int getUnderlineColor(int column) {
+    return (mUnderlineColor == null || column < 0 || column >= mColumns) ? 0 : mUnderlineColor[column];
+  }
+
+  /** Set (or clear, when color is 0) the underline colour at the given column. */
+  public void setUnderlineColor(int column, int color) {
+    if (column < 0 || column >= mColumns) return;
+    if (color == 0) {
+      if (mUnderlineColor != null) mUnderlineColor[column] = 0;
+      return;
+    }
+    if (mUnderlineColor == null) mUnderlineColor = new int[mColumns];
+    mUnderlineColor[column] = color;
   }
 
   /** OSC 8 hyperlink target at the given column, or null. */
@@ -173,6 +198,8 @@ public final class TerminalRow {
     // Overwriting a cell drops any hyperlink it carried; the emulator re-applies
     // the active OSC 8 link (if any) right after writing the character.
     if (mHyperlink != null) mHyperlink[columnToSet] = null;
+    // Likewise drop the cell's underline colour; the emulator re-applies the active one.
+    if (mUnderlineColor != null) mUnderlineColor[columnToSet] = 0;
 
     final int newCodePointDisplayWidth = WcWidth.width(codePoint);
 

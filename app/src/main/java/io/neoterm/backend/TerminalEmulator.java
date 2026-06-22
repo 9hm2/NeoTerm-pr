@@ -330,6 +330,9 @@ public final class TerminalEmulator {
   /** Extended underline style (SGR 4:x): one of TextStyle.UNDERLINE_*; 0 = plain single. */
   private int mUnderlineStyle;
 
+  /** Active underline colour (SGR 58, ARGB; 0 = none -> underline uses the text colour). */
+  private int mUnderlineColor;
+
   /** The currently-open OSC 8 hyperlink target (applied to written cells), or null. */
   private String mCurrentHyperlink;
 
@@ -1955,6 +1958,7 @@ public final class TerminalEmulator {
         mBackColor = TextStyle.COLOR_INDEX_BACKGROUND;
         mEffect = 0;
         mUnderlineStyle = 0;
+        mUnderlineColor = 0;
       } else if (code == 1) {
         mEffect |= TextStyle.CHARACTER_ATTRIBUTE_BOLD;
       } else if (code == 2) {
@@ -2021,21 +2025,23 @@ public final class TerminalEmulator {
               int argbColor = 0xff000000 | (red << 16) | (green << 8) | blue;
               if (code == 38) mForeColor = argbColor;
               else if (code == 48) mBackColor = argbColor;
-              // code == 58: underline colour, not stored.
+              else mUnderlineColor = argbColor; // 58
             }
           }
           i = Math.min(mArgIndex, last);
         } else if (firstArg == 5) {
           int color = (i + 2 <= mArgIndex) ? mArgs[i + 2] : -1;
-          if (code != 58 && color >= 0 && color < TextStyle.NUM_INDEXED_COLORS) {
+          if (color >= 0 && color < TextStyle.NUM_INDEXED_COLORS) {
             if (code == 38) mForeColor = color;
-            else mBackColor = color;
+            else if (code == 48) mBackColor = color;
+            else mUnderlineColor = mColors.mCurrentColors[color]; // 58: store the resolved ARGB
           }
           i = Math.min(mArgIndex, colon ? groupEnd : i + 2);
         } else {
           i = Math.min(mArgIndex, groupEnd);
         }
-      } else if (code == 59) { // Default underline colour - not stored, no-op.
+      } else if (code == 59) { // Default underline colour.
+        mUnderlineColor = 0;
       } else if (code == 39) { // Set default foregroundColor color.
         mForeColor = TextStyle.COLOR_INDEX_FOREGROUND;
       } else if (code >= 40 && code <= 47) { // Set backgroundColor color.
@@ -2559,6 +2565,10 @@ public final class TerminalEmulator {
     if (mCurrentHyperlink != null) {
       mScreen.setHyperlink(writeColumn, mCursorRow, mCurrentHyperlink);
     }
+    // Likewise carry the active underline colour (SGR 58) onto the cell.
+    if (mUnderlineColor != 0) {
+      mScreen.setUnderlineColorAt(writeColumn, mCursorRow, mUnderlineColor);
+    }
 
     if (autoWrap && displayWidth > 0)
       mAboutToAutoWrap = (mCursorCol == mRightMargin - displayWidth);
@@ -2617,6 +2627,8 @@ public final class TerminalEmulator {
   public void reset() {
     mCursorStyle = CURSOR_STYLE_BLOCK;
     mCursorBlinkingEnabled = true;
+    mUnderlineStyle = 0;
+    mUnderlineColor = 0;
     mArgIndex = 0;
     mContinueSequence = false;
     mEscapeState = ESC_NONE;

@@ -411,6 +411,12 @@ public final class TerminalBuffer {
     allocateFullLineIfNecessary(externalToInternalRow(row)).setHyperlink(column, uri);
   }
 
+  /** Apply (or clear, when color is 0) the underline colour at a cell. */
+  public void setUnderlineColorAt(int column, int row, int color) {
+    if (row >= mScreenRows || column >= mColumns || column < 0) return;
+    allocateFullLineIfNecessary(externalToInternalRow(row)).setUnderlineColor(column, color);
+  }
+
   /** The OSC 8 hyperlink target at a cell, or null. */
   public String getHyperlinkAt(int externalRow, int column) {
     if (column < 0 || column >= mColumns) return null;
