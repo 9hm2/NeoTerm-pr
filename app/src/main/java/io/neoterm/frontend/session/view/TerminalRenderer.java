@@ -72,6 +72,17 @@ final class TerminalRenderer {
   private final Paint mUnderlinePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
   private final android.graphics.Path mUnderlinePath = new android.graphics.Path();
 
+  /** Whether blinking text is currently in its visible half-cycle (set per render() call). */
+  private boolean mTextBlinkVisible = true;
+  /** Set during a render pass if any cell carried the BLINK attribute (presence, not phase). */
+  private boolean mHasBlinkingCells = false;
+
+  /** Whether the last render saw any blinking cell — the view uses this to run the blink timer
+   *  only while blinking content is on screen. */
+  boolean hasBlinkingCells() {
+    return mHasBlinkingCells;
+  }
+
   public TerminalRenderer(int textSize, Typeface typeface) {
     mTextSize = textSize;
     mTypeface = typeface;
@@ -97,7 +108,9 @@ final class TerminalRenderer {
    */
   public final void render(TerminalEmulator mEmulator, Canvas canvas, int topRow,
                            int selectionY1, int selectionY2, int selectionX1, int selectionX2,
-                           boolean cursorBlinkOn) {
+                           boolean cursorBlinkOn, boolean textBlinkOn) {
+    mTextBlinkVisible = textBlinkOn;
+    mHasBlinkingCells = false;
     final boolean reverseVideo = mEmulator.isReverseVideo();
     final int endRow = topRow + mEmulator.mRows;
     final int columns = mEmulator.mColumns;
@@ -385,7 +398,9 @@ final class TerminalRenderer {
     int foreColor = TextStyle.decodeForeColor(textStyle);
     final int effect = TextStyle.decodeEffect(textStyle);
     int backColor = TextStyle.decodeBackColor(textStyle);
-    final boolean bold = (effect & (TextStyle.CHARACTER_ATTRIBUTE_BOLD | TextStyle.CHARACTER_ATTRIBUTE_BLINK)) != 0;
+    final boolean bold = (effect & TextStyle.CHARACTER_ATTRIBUTE_BOLD) != 0;
+    final boolean blink = (effect & TextStyle.CHARACTER_ATTRIBUTE_BLINK) != 0;
+    if (blink) mHasBlinkingCells = true;
     // URLs are underlined so the user can see they are tappable.
     final boolean underline = forceUnderline || (effect & TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE) != 0;
     final boolean italic = (effect & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0;
@@ -449,7 +464,10 @@ final class TerminalRenderer {
       savedLastDrawnLineY = y;
     }
 
-    if ((effect & TextStyle.CHARACTER_ATTRIBUTE_INVISIBLE) == 0) {
+    // Blinking text is hidden during the "off" half of the blink phase (the cell's background
+    // still shows). The cursor cell is never hidden so it stays usable.
+    final boolean blinkHidden = blink && !mTextBlinkVisible && cursor == 0;
+    if ((effect & TextStyle.CHARACTER_ATTRIBUTE_INVISIBLE) == 0 && !blinkHidden) {
       // A block cursor fills the whole cell with the cursor colour and the glyph is painted on
       // top of it. Draw that glyph in the cell's background colour (reverse video under the
       // cursor) so it stays readable -- otherwise a glyph whose colour happens to match the

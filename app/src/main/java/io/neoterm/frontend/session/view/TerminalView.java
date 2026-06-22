@@ -110,6 +110,8 @@ public final class TerminalView extends View {
     mRefreshScheduled = false;
     Choreographer.getInstance().removeFrameCallback(mRefreshFrameCallback);
     removeCallbacks(mCursorBlinkRunnable);
+    removeCallbacks(mTextBlinkRunnable);
+    mTextBlinkScheduled = false;
     super.onDetachedFromWindow();
   }
 
@@ -153,6 +155,19 @@ public final class TerminalView extends View {
     mCursorBlinkOn = true;
     if (mViewAttached) postDelayed(mCursorBlinkRunnable, CURSOR_BLINK_MS);
   }
+
+  /** Text blink (SGR 5) half-period. */
+  private static final long TEXT_BLINK_MS = 600;
+  private boolean mTextBlinkOn = true;
+  private boolean mTextBlinkScheduled = false;
+  private final Runnable mTextBlinkRunnable = new Runnable() {
+    @Override
+    public void run() {
+      mTextBlinkScheduled = false;
+      mTextBlinkOn = !mTextBlinkOn;
+      invalidate(); // onDraw re-arms the timer while blinking content is still present
+    }
+  };
 
   TerminalViewClient mClient;
 
@@ -1541,7 +1556,15 @@ public final class TerminalView extends View {
         saveCount = canvas.save();
         canvas.translate(0, -mKeyboardPanPx);
       }
-      mRenderer.render(mEmulator, canvas, mTopRow, mSelY1, mSelY2, mSelX1, mSelX2, mCursorBlinkOn);
+      mRenderer.render(mEmulator, canvas, mTopRow, mSelY1, mSelY2, mSelX1, mSelX2, mCursorBlinkOn, mTextBlinkOn);
+      // Run the text-blink timer only while blinking content is actually on screen.
+      if (mRenderer.hasBlinkingCells()) {
+        if (!mTextBlinkScheduled) { mTextBlinkScheduled = true; postDelayed(mTextBlinkRunnable, TEXT_BLINK_MS); }
+      } else if (mTextBlinkScheduled) {
+        mTextBlinkScheduled = false;
+        removeCallbacks(mTextBlinkRunnable);
+        mTextBlinkOn = true;
+      }
 
       if (mIsSelectingText) {
         final int gripHandleWidth = mLeftSelectionHandle.getIntrinsicWidth();
