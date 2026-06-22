@@ -205,6 +205,9 @@ public final class TerminalEmulator {
 
   private int mCursorStyle = CURSOR_STYLE_BLOCK;
 
+  /** Whether the cursor should blink (DECSCUSR; default on). The view drives the animation. */
+  private boolean mCursorBlinkingEnabled = true;
+
   /**
    * The number of character rows and columns in the terminal screen.
    */
@@ -473,6 +476,11 @@ public final class TerminalEmulator {
    */
   public int getCursorStyle() {
     return mCursorStyle;
+  }
+
+  /** Whether the cursor should blink (DECSCUSR steady/blinking variants). */
+  public boolean isCursorBlinkingEnabled() {
+    return mCursorBlinkingEnabled;
   }
 
   public boolean isReverseVideo() {
@@ -895,6 +903,8 @@ public final class TerminalEmulator {
                     mCursorStyle = CURSOR_STYLE_BAR;
                     break;
                 }
+                // Even args (2/4/6) are steady; odd args and 0 (the default) blink.
+                mCursorBlinkingEnabled = !(arg == 2 || arg == 4 || arg == 6);
                 break;
               case 't':
               case 'u':
@@ -2581,6 +2591,7 @@ public final class TerminalEmulator {
    */
   public void reset() {
     mCursorStyle = CURSOR_STYLE_BLOCK;
+    mCursorBlinkingEnabled = true;
     mArgIndex = 0;
     mContinueSequence = false;
     mEscapeState = ESC_NONE;

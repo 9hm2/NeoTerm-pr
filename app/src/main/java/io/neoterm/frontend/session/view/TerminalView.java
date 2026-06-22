@@ -101,6 +101,7 @@ public final class TerminalView extends View {
   protected void onAttachedToWindow() {
     super.onAttachedToWindow();
     mViewAttached = true;
+    restartCursorBlink();
   }
 
   @Override
@@ -108,7 +109,45 @@ public final class TerminalView extends View {
     mViewAttached = false;
     mRefreshScheduled = false;
     Choreographer.getInstance().removeFrameCallback(mRefreshFrameCallback);
+    removeCallbacks(mCursorBlinkRunnable);
     super.onDetachedFromWindow();
+  }
+
+  @Override
+  protected void onFocusChanged(boolean gainFocus, int direction, android.graphics.Rect previouslyFocusedRect) {
+    super.onFocusChanged(gainFocus, direction, previouslyFocusedRect);
+    // Cursor only blinks while focused; show it solid otherwise (like a typical terminal).
+    mCursorBlinkOn = true;
+    restartCursorBlink();
+    invalidate();
+  }
+
+  /** Time the cursor stays on / off while blinking. */
+  private static final long CURSOR_BLINK_MS = 500;
+  /** Current blink phase: when false the cursor is hidden for this half-cycle. */
+  private boolean mCursorBlinkOn = true;
+  private final Runnable mCursorBlinkRunnable = new Runnable() {
+    @Override
+    public void run() {
+      if (!mViewAttached || mEmulator == null) return;
+      // Blink only when focused, the cursor is shown, and DECSCUSR asked for a blinking style.
+      boolean blink = isFocused() && mEmulator.isShowingCursor() && mEmulator.isCursorBlinkingEnabled();
+      if (blink) {
+        mCursorBlinkOn = !mCursorBlinkOn;
+        invalidate();
+      } else if (!mCursorBlinkOn) {
+        mCursorBlinkOn = true;
+        invalidate();
+      }
+      postDelayed(this, CURSOR_BLINK_MS);
+    }
+  };
+
+  /** Reset the cursor to solid and restart the blink timer (e.g. on focus or output activity). */
+  private void restartCursorBlink() {
+    removeCallbacks(mCursorBlinkRunnable);
+    mCursorBlinkOn = true;
+    if (mViewAttached) postDelayed(mCursorBlinkRunnable, CURSOR_BLINK_MS);
   }
 
   TerminalViewClient mClient;
@@ -684,6 +723,8 @@ public final class TerminalView extends View {
 
     mEmulator.clearScrollCounter();
     scheduleRefresh();
+    // Keep the cursor solid while output is flowing; it resumes blinking once things go idle.
+    restartCursorBlink();
 
     // Basic accessibility service
     String contentText = mEmulator.getScreen()
@@ -1496,7 +1537,7 @@ public final class TerminalView extends View {
         saveCount = canvas.save();
         canvas.translate(0, -mKeyboardPanPx);
       }
-      mRenderer.render(mEmulator, canvas, mTopRow, mSelY1, mSelY2, mSelX1, mSelX2);
+      mRenderer.render(mEmulator, canvas, mTopRow, mSelY1, mSelY2, mSelX1, mSelX2, mCursorBlinkOn);
 
       if (mIsSelectingText) {
         final int gripHandleWidth = mLeftSelectionHandle.getIntrinsicWidth();

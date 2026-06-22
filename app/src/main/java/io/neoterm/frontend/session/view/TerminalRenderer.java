@@ -92,13 +92,15 @@ final class TerminalRenderer {
    * Render the terminal to a canvas with at a specified row scroll, and an optional rectangular selection.
    */
   public final void render(TerminalEmulator mEmulator, Canvas canvas, int topRow,
-                           int selectionY1, int selectionY2, int selectionX1, int selectionX2) {
+                           int selectionY1, int selectionY2, int selectionX1, int selectionX2,
+                           boolean cursorBlinkOn) {
     final boolean reverseVideo = mEmulator.isReverseVideo();
     final int endRow = topRow + mEmulator.mRows;
     final int columns = mEmulator.mColumns;
     final int cursorCol = mEmulator.getCursorCol();
     final int cursorRow = mEmulator.getCursorRow();
-    final boolean cursorVisible = mEmulator.isShowingCursor();
+    // The cursor is shown when the emulator says so AND the view's blink phase is currently "on".
+    final boolean cursorVisible = mEmulator.isShowingCursor() && cursorBlinkOn;
     final TerminalBuffer screen = mEmulator.getScreen();
     final int[] palette = mEmulator.mColors.mCurrentColors;
     final int cursorShape = mEmulator.getCursorStyle();
