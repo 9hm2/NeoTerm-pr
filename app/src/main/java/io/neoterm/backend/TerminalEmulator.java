@@ -175,7 +175,8 @@ public final class TerminalEmulator {
    */
   private static final int DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT = 1 << 7;
   /**
-   * DECSET 1004 - NOT implemented.
+   * DECSET 1004 - when set, the terminal reports focus in/out as CSI I / CSI O (see
+   * {@link #isFocusEventsEnabled()}; the view sends the reports on focus change).
    */
   private static final int DECSET_BIT_SEND_FOCUS_EVENTS = 1 << 8;
   /**
@@ -481,6 +482,11 @@ public final class TerminalEmulator {
   /** Whether the cursor should blink (DECSCUSR steady/blinking variants). */
   public boolean isCursorBlinkingEnabled() {
     return mCursorBlinkingEnabled;
+  }
+
+  /** DECSET 1004: whether the app wants CSI I / CSI O focus-in / focus-out reports. */
+  public boolean isFocusEventsEnabled() {
+    return isDecsetInternalBitSet(DECSET_BIT_SEND_FOCUS_EVENTS);
   }
 
   public boolean isReverseVideo() {

@@ -120,6 +120,10 @@ public final class TerminalView extends View {
     mCursorBlinkOn = true;
     restartCursorBlink();
     invalidate();
+    // DECSET 1004: report focus in/out to apps that asked for it (vim, tmux, …).
+    if (mEmulator != null && mTermSession != null && mEmulator.isFocusEventsEnabled()) {
+      mTermSession.write(gainFocus ? "\033[I" : "\033[O");
+    }
   }
 
   /** Time the cursor stays on / off while blinking. */
