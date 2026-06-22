@@ -448,7 +448,13 @@ final class TerminalRenderer {
     // (Measuring against the user font, whose glyph the run lacks, would mis-scale
     // it.) The typeface is restored at the end of the method.
     if (fallbackFont) {
-      mTextPaint.setTypeface(sFallbackTypeface);
+      // Emoji (incl. ZWJ clusters / skin-tone) must use the system font, which has the colour
+      // emoji font and shapes the cluster into one glyph; the bundled symbol font (monochrome
+      // Unifont) can't and would render blank. Other missing glyphs use the symbol fallback.
+      char fc = text[startCharIndex];
+      int firstCp = (Character.isHighSurrogate(fc) && startCharIndex + 1 < text.length)
+        ? Character.toCodePoint(fc, text[startCharIndex + 1]) : fc;
+      mTextPaint.setTypeface(isEmojiCodepoint(firstCp) ? Typeface.DEFAULT : sFallbackTypeface);
       float fallbackMeasured = mTextPaint.measureText(text, startCharIndex, runWidthChars);
       if (fallbackMeasured > 0f) mes = fallbackMeasured;
     }
@@ -591,6 +597,12 @@ final class TerminalRenderer {
       default:
         canvas.drawLine(left, lineY, right, lineY, mUnderlinePaint);
     }
+  }
+
+  /** Emoji code points that should render with the system colour-emoji font, not the symbol
+   *  fallback: the supplementary emoji blocks plus Misc Symbols / Dingbats. */
+  private static boolean isEmojiCodepoint(int cp) {
+    return cp >= 0x1F000 || (cp >= 0x2600 && cp <= 0x27BF);
   }
 
   float getCursorX() {
