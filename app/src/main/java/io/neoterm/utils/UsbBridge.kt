@@ -226,6 +226,12 @@ class UsbReceiver : BroadcastReceiver() {
       UsbManager.ACTION_USB_DEVICE_ATTACHED ->
         if (device != null) {
           Kmsg.log(usbKmsgLine("new USB device", device))
+          if (UsbSerialBridge.isSerial(device) && !NeoPreference.isUsbSerialEnabled()) {
+            Kmsg.log(
+              "usb-serial: ${"%04x:%04x".format(device.vendorId, device.productId)} is a serial " +
+                "adapter — enable Settings > General > 'USB serial' to expose /dev/ttyUSB*"
+            )
+          }
           UsbBridge.requestPermission(context, usb, device)
         }
       UsbBridge.ACTION_USB_PERMISSION -> {

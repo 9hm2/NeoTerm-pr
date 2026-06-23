@@ -6,6 +6,8 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.os.ParcelFileDescriptor
 import android.system.Os
+import android.system.OsConstants
+import android.system.StructPollfd
 import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
 import com.hoho.android.usbserial.driver.Ch34xSerialDriver
 import com.hoho.android.usbserial.driver.Cp21xxSerialDriver
@@ -19,148 +21,212 @@ import io.neoterm.setup.proot.Kmsg
 import io.neoterm.utils.NLog
 
 /**
- * USB-serial bridge: drives FTDI/CP210x/CH34x/PL2303/CDC-ACM adapters app-side
- * with usb-serial-for-android, and exposes each as a PTY whose slave path proot
- * binds onto /dev/ttyUSB*. Data flows PTY-native; the guest's termios (baud,
- * data/stop bits, parity) is read off the PTY master and programmed onto the
- * chip. Gated at runtime by [NeoPreference.isUsbSerialEnabled]; the device list
- * comes from the kernel-derived [UsbSerialIds] table (no manifest device_filter).
+ * USB-serial bridge with hotplug: a fixed pool of PTYs is created once and bound
+ * by proot onto /dev/ttyUSB0..N at launch, so the ports always exist. When an
+ * adapter is attached it is assigned to a free pool slot and its chip (driven by
+ * usb-serial-for-android) is pumped to that slot's PTY; on detach the slot is
+ * freed but the PTY stays bound, so a later plug reuses it live — no new tab.
  *
- * Modem control lines (DTR/RTS/CTS/DSR/DCD/RI) and BREAK are not carried by a
- * PTY; those are handled by the proot control-ioctl proxy (separate piece).
+ * Everything notable is logged to the kmsg/dmesg buffer ([Kmsg]) for debugging.
+ * Data + termios (baud/data/stop/parity/flow) flow via the PTY; modem lines
+ * (DTR/RTS/CTS/DSR/DCD/RI) + BREAK are handled by the proot ioctl proxy (later).
  */
 object UsbSerialBridge {
 
-  private class Link(
-    val port: UsbSerialPort,
-    val conn: UsbDeviceConnection,
-    val pfd: ParcelFileDescriptor,   // owns the PTY master fd
+  private const val POOL = 4
+  private const val TAG = "UsbSerial"
+
+  private class Slot(
+    val pfd: ParcelFileDescriptor,   // owns the persistent PTY master fd
     val slavePath: String,
     val ttyName: String,
   ) {
-    @Volatile var running = true
+    @Volatile var running = false
+    var deviceName: String? = null
+    var port: UsbSerialPort? = null
+    var conn: UsbDeviceConnection? = null
     val threads = ArrayList<Thread>()
     var lastParams: IntArray? = null
-    val masterFd: Int get() = pfd.fd
     val masterJfd get() = pfd.fileDescriptor
+    val masterFd: Int get() = pfd.fd
   }
 
-  private val links = LinkedHashMap<String, Link>()  // deviceName -> Link
+  private var pool: Array<Slot>? = null
+
+  // ── pool lifecycle ──────────────────────────────────────────────────────
+  @Synchronized
+  private fun ensurePool(): Array<Slot>? {
+    pool?.let { return it }
+    if (!NeoPreference.isUsbSerialEnabled()) return null
+    val slots = ArrayList<Slot>(POOL)
+    for (i in 0 until POOL) {
+      val out = IntArray(1)
+      val slave = Pty.open(out) ?: break
+      slots.add(Slot(ParcelFileDescriptor.adoptFd(out[0]), slave, "ttyUSB$i"))
+    }
+    if (slots.isEmpty()) {
+      Kmsg.log("usb-serial: PTY pool creation failed (no /dev/ttyUSB*)")
+      return null
+    }
+    val arr = slots.toTypedArray()
+    pool = arr
+    Kmsg.log("usb-serial: ready — pool of ${arr.size} ports /dev/ttyUSB0..${arr.size - 1} (hotplug)")
+    return arr
+  }
 
   /** (slavePath -> "/dev/ttyUSBn") pairs for ProotManager to bind at launch. */
   @Synchronized
-  fun bindings(): List<Pair<String, String>> =
-    links.values.map { it.slavePath to "/dev/${it.ttyName}" }
-
-  /** True if this device is a USB-serial chip we can drive (cheap, no open). */
-  fun isSerial(device: UsbDevice): Boolean {
-    if (UsbSerialIds.driverFor(device.vendorId, device.productId) != null) return true
-    for (i in 0 until device.interfaceCount) {
-      val c = device.getInterface(i).interfaceClass
-      if (c == UsbConstants.USB_CLASS_COMM || c == UsbConstants.USB_CLASS_CDC_DATA) return true
-    }
-    return false
+  fun bindings(): List<Pair<String, String>> {
+    val p = ensurePool() ?: return emptyList()
+    return p.map { it.slavePath to "/dev/${it.ttyName}" }
   }
 
-  /** Open + bridge the device, if the toggle is on and we have a driver + permission. */
+  // ── device recognition ──────────────────────────────────────────────────
+  /** True if this device is a USB-serial chip we can drive (cheap, no open). */
+  fun isSerial(device: UsbDevice): Boolean = driverTag(device) != null
+
+  private fun driverTag(device: UsbDevice): String? {
+    UsbSerialIds.driverFor(device.vendorId, device.productId)?.let { return it }
+    for (i in 0 until device.interfaceCount) {
+      val c = device.getInterface(i).interfaceClass
+      if (c == UsbConstants.USB_CLASS_COMM || c == UsbConstants.USB_CLASS_CDC_DATA) return "CdcAcmSerialDriver"
+    }
+    return null
+  }
+
+  private fun driverFor(device: UsbDevice): UsbSerialDriver? = when (driverTag(device)) {
+    "FtdiSerialDriver" -> FtdiSerialDriver(device)
+    "Cp21xxSerialDriver" -> Cp21xxSerialDriver(device)
+    "Ch34xSerialDriver" -> Ch34xSerialDriver(device)
+    "ProlificSerialDriver" -> ProlificSerialDriver(device)
+    "CdcAcmSerialDriver" -> CdcAcmSerialDriver(device)
+    else -> null
+  }
+
+  // ── attach / detach ─────────────────────────────────────────────────────
   @Synchronized
   fun attach(usb: UsbManager, device: UsbDevice) {
     if (!NeoPreference.isUsbSerialEnabled()) return
-    if (links.containsKey(device.deviceName)) return
+    val id = "%04x:%04x".format(device.vendorId, device.productId)
+    val p = ensurePool() ?: return
+    if (p.any { it.deviceName == device.deviceName }) return  // already bridged
     val driver = driverFor(device) ?: return
-    if (!usb.hasPermission(device)) return  // UsbBridge requests it; we re-attach on grant
-    val conn = runCatching { usb.openDevice(device) }.getOrNull() ?: return
-    val port = driver.ports.firstOrNull() ?: run { runCatching { conn.close() }; return }
+    if (!usb.hasPermission(device)) {
+      Kmsg.log("usb-serial: $id detected (${driver.javaClass.simpleName}) — waiting for USB permission")
+      return
+    }
+    val slot = p.firstOrNull { it.deviceName == null }
+    if (slot == null) {
+      Kmsg.log("usb-serial: $id detected but pool full ($POOL ports in use)")
+      return
+    }
+    val conn = runCatching { usb.openDevice(device) }.getOrNull()
+    if (conn == null) { Kmsg.log("usb-serial: $id openDevice() failed"); return }
+    val port = driver.ports.firstOrNull()
+    if (port == null) { runCatching { conn.close() }; Kmsg.log("usb-serial: $id has no serial ports"); return }
     try {
       port.open(conn)
       port.setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
     } catch (e: Exception) {
-      NLog.e("UsbSerial", "open failed: ${e.message}")
+      Kmsg.log("usb-serial: $id open failed: ${e.message}")
       runCatching { port.close() }; runCatching { conn.close() }; return
     }
-    val out = IntArray(1)
-    val slave = Pty.open(out)
-    if (slave == null) {
-      NLog.e("UsbSerial", "openPty failed")
-      runCatching { port.close() }; runCatching { conn.close() }; return
-    }
-    val pfd = ParcelFileDescriptor.adoptFd(out[0])
-    val tty = "ttyUSB${links.size}"
-    val link = Link(port, conn, pfd, slave, tty)
-    links[device.deviceName] = link
-    startPump(link)
-    Kmsg.log("usb-serial: $tty <- ${"%04x:%04x".format(device.vendorId, device.productId)} (${driver.javaClass.simpleName})")
-    NLog.e("UsbSerial", "attached $tty (${device.deviceName})")
+    slot.deviceName = device.deviceName
+    slot.port = port
+    slot.conn = conn
+    slot.lastParams = null
+    slot.running = true
+    startPump(slot)
+    val product = runCatching { device.productName }.getOrNull()?.takeIf { it.isNotBlank() } ?: ""
+    Kmsg.log("usb-serial: ${slot.ttyName} <- $id ${product.ifEmpty { driver.javaClass.simpleName }} (${driver.javaClass.simpleName}) @9600 8N1")
+    NLog.e(TAG, "attached ${slot.ttyName} for ${device.deviceName} ($id)")
   }
 
   @Synchronized
   fun onDetached(device: UsbDevice?) {
-    teardown(links.remove(device?.deviceName ?: return) ?: return)
+    val name = device?.deviceName ?: return
+    val slot = pool?.firstOrNull { it.deviceName == name } ?: return
+    releaseSlot(slot, "${slot.ttyName}: adapter disconnected")
   }
 
   @Synchronized
   fun stopAll() {
-    links.values.forEach { teardown(it) }
-    links.clear()
+    pool?.forEach { slot ->
+      if (slot.deviceName != null) releaseSlot(slot, "${slot.ttyName}: released (service stop)")
+      runCatching { slot.pfd.close() }
+    }
+    pool = null
   }
 
-  private fun teardown(link: Link) {
-    link.running = false
-    runCatching { link.pfd.close() }       // unblocks the tx read on the master
-    link.threads.forEach { it.interrupt() }
-    runCatching { link.port.close() }
-    runCatching { link.conn.close() }
-    Kmsg.log("usb-serial: ${link.ttyName} disconnected")
+  /** Stop pumping + close the chip, but keep the pool PTY bound for the next plug. */
+  private fun releaseSlot(slot: Slot, msg: String) {
+    slot.running = false
+    slot.threads.forEach { it.interrupt() }
+    slot.threads.clear()
+    runCatching { slot.port?.close() }
+    runCatching { slot.conn?.close() }
+    slot.port = null
+    slot.conn = null
+    slot.deviceName = null
+    slot.lastParams = null
+    Kmsg.log("usb-serial: $msg")
   }
 
-  private fun startPump(link: Link) {
-    // chip -> pty ; this loop also polls the guest's termios (ticks every 200ms).
+  // ── pump ────────────────────────────────────────────────────────────────
+  private fun startPump(slot: Slot) {
+    // chip -> pty (port.read has a 200ms timeout, so it exits promptly on stop).
     val rx = Thread({
       val buf = ByteArray(4096)
-      while (link.running) {
-        applyParamsIfChanged(link)
+      while (slot.running) {
         val n = try {
-          link.port.read(buf, 200)
+          slot.port?.read(buf, 200) ?: break
         } catch (e: Exception) {
-          if (link.running) NLog.e("UsbSerial", "rx: ${e.message}"); break
+          if (slot.running) Kmsg.log("usb-serial: ${slot.ttyName} read error: ${e.message}")
+          break
         }
-        if (n > 0) writeFully(link, buf, n)
+        if (n > 0) writeFully(slot, buf, n)
       }
-    }, "ttyusb-rx").apply { isDaemon = true }
+    }, "ttyusb-rx-${slot.ttyName}").apply { isDaemon = true }
 
-    // pty -> chip
+    // pty -> chip, polled so it never blocks forever on the master (clean release).
     val tx = Thread({
-      val buf = ByteArray(4096)
-      while (link.running) {
-        val n = try {
-          Os.read(link.masterJfd, buf, 0, buf.size)
-        } catch (e: Exception) {
-          break   // master closed (teardown) or slave gone
-        }
-        if (n <= 0) break
-        runCatching { link.port.write(buf.copyOf(n), 1000) }
+      val pfd = StructPollfd().apply {
+        fd = slot.masterJfd
+        events = OsConstants.POLLIN.toShort()
       }
-    }, "ttyusb-tx").apply { isDaemon = true }
+      val buf = ByteArray(4096)
+      while (slot.running) {
+        applyParamsIfChanged(slot)
+        pfd.revents = 0
+        val ready = try { Os.poll(arrayOf(pfd), 200) } catch (e: Exception) { break }
+        if (!slot.running) break
+        if (ready > 0 && (pfd.revents.toInt() and OsConstants.POLLIN) != 0) {
+          val n = try { Os.read(slot.masterJfd, buf, 0, buf.size) } catch (e: Exception) { break }
+          if (n <= 0) break
+          runCatching { slot.port?.write(buf.copyOf(n), 1000) }
+        }
+      }
+    }, "ttyusb-tx-${slot.ttyName}").apply { isDaemon = true }
 
-    link.threads.add(rx); link.threads.add(tx)
+    slot.threads.add(rx); slot.threads.add(tx)
     rx.start(); tx.start()
   }
 
-  /** Write all [len] bytes to the PTY master (handles partial writes). */
-  private fun writeFully(link: Link, buf: ByteArray, len: Int) {
+  private fun writeFully(slot: Slot, buf: ByteArray, len: Int) {
     var off = 0
-    while (link.running && off < len) {
-      val w = try { Os.write(link.masterJfd, buf, off, len - off) } catch (e: Exception) { return }
+    while (slot.running && off < len) {
+      val w = try { Os.write(slot.masterJfd, buf, off, len - off) } catch (e: Exception) { return }
       if (w <= 0) return
       off += w
     }
   }
 
-  /** Read the PTY termios and program the chip when baud/parity/etc. change. */
-  private fun applyParamsIfChanged(link: Link) {
-    val p = runCatching { Pty.serialParams(link.masterFd) }.getOrNull() ?: return
-    if (p.contentEquals(link.lastParams)) return
-    link.lastParams = p
+  /** Read the guest's PTY termios and program the chip when it changes. */
+  private fun applyParamsIfChanged(slot: Slot) {
+    val port = slot.port ?: return
+    val p = runCatching { Pty.serialParams(slot.masterFd) }.getOrNull() ?: return
+    if (p.contentEquals(slot.lastParams)) return
+    slot.lastParams = p
     val parity = when (p[3]) {
       1 -> UsbSerialPort.PARITY_ODD
       2 -> UsbSerialPort.PARITY_EVEN
@@ -168,22 +234,9 @@ object UsbSerialBridge {
       4 -> UsbSerialPort.PARITY_SPACE
       else -> UsbSerialPort.PARITY_NONE
     }
-    runCatching { link.port.setParameters(p[0], p[1], p[2], parity) }
-  }
-
-  private fun driverFor(device: UsbDevice): UsbSerialDriver? {
-    when (UsbSerialIds.driverFor(device.vendorId, device.productId)) {
-      "FtdiSerialDriver" -> return FtdiSerialDriver(device)
-      "Cp21xxSerialDriver" -> return Cp21xxSerialDriver(device)
-      "Ch34xSerialDriver" -> return Ch34xSerialDriver(device)
-      "ProlificSerialDriver" -> return ProlificSerialDriver(device)
-    }
-    for (i in 0 until device.interfaceCount) {
-      val c = device.getInterface(i).interfaceClass
-      if (c == UsbConstants.USB_CLASS_COMM || c == UsbConstants.USB_CLASS_CDC_DATA) {
-        return CdcAcmSerialDriver(device)
-      }
-    }
-    return null
+    val ok = runCatching { port.setParameters(p[0], p[1], p[2], parity) }.isSuccess
+    val pc = "NOEMS"[p[3].coerceIn(0, 4)]
+    val flow = when (p[4]) { 1 -> "rts/cts"; 2 -> "xon/xoff"; else -> "none" }
+    Kmsg.log("usb-serial: ${slot.ttyName} set ${p[0]} ${p[1]}$pc${p[2]} flow=$flow${if (ok) "" else " (FAILED)"}")
   }
 }
