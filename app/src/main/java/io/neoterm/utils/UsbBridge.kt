@@ -12,6 +12,7 @@ import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.os.Build
 import android.system.Os
+import io.neoterm.setup.proot.Kmsg
 import java.io.FileDescriptor
 
 /**
@@ -218,7 +219,10 @@ class UsbReceiver : BroadcastReceiver() {
     val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
     when (intent.action) {
       UsbManager.ACTION_USB_DEVICE_ATTACHED ->
-        if (device != null) UsbBridge.requestPermission(context, usb, device)
+        if (device != null) {
+          Kmsg.log(usbKmsgLine("new USB device", device))
+          UsbBridge.requestPermission(context, usb, device)
+        }
       UsbBridge.ACTION_USB_PERMISSION -> {
         val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
         NLog.e("UsbBridge", "Permission ${if (granted) "granted" else "denied"} for ${device?.deviceName}")
@@ -226,8 +230,20 @@ class UsbReceiver : BroadcastReceiver() {
       }
       UsbManager.ACTION_USB_DEVICE_DETACHED -> {
         NLog.e("UsbBridge", "Detached ${device?.deviceName}")
+        if (device != null) Kmsg.log(usbKmsgLine("USB disconnect,", device))
         UsbBridge.onDetached(device)
       }
     }
+  }
+}
+
+/** Kernel-szerű kmsg-sor egy USB-eszközről (a guest dmesg-jébe). */
+private fun usbKmsgLine(what: String, d: UsbDevice): String {
+  val product = runCatching { d.productName }.getOrNull()?.takeIf { it.isNotBlank() }
+  return buildString {
+    append("usb ").append(d.deviceName).append(": ").append(what)
+    append(" idVendor=").append(String.format("%04x", d.vendorId))
+    append(", idProduct=").append(String.format("%04x", d.productId))
+    if (product != null) append(", Product=").append(product)
   }
 }
