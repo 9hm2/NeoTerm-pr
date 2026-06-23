@@ -39,11 +39,12 @@ object UsbSerialBridge {
   private const val TAG = "UsbSerial"
 
   private class Slot(
-    val pfd: ParcelFileDescriptor,   // owns the persistent PTY master fd
-    val slavePath: String,
+    var pfd: ParcelFileDescriptor,   // owns the PTY master fd (recreated per launch)
+    var slavePath: String,
     val ttyName: String,
   ) {
     @Volatile var running = false
+    @Volatile var alive = true       // false once the master was closed on detach
     var deviceName: String? = null
     var port: UsbSerialPort? = null
     var conn: UsbDeviceConnection? = null
@@ -51,6 +52,7 @@ object UsbSerialBridge {
     var lastParams: IntArray? = null
     var dtr = false       // cached modem-control outputs (PTY can't carry them)
     var rts = false
+    var lastModemLogMs = 0L
     val masterJfd get() = pfd.fileDescriptor
     val masterFd: Int get() = pfd.fd
   }
@@ -125,7 +127,13 @@ object UsbSerialBridge {
     val port = slot.port ?: return
     if (dtr != slot.dtr) { runCatching { port.setDTR(dtr) }; slot.dtr = dtr }
     if (rts != slot.rts) { runCatching { port.setRTS(rts) }; slot.rts = rts }
-    Kmsg.log("usb-serial: ${slot.ttyName} DTR=${if (slot.dtr) 1 else 0} RTS=${if (slot.rts) 1 else 0}")
+    // Throttle the log: reset sequences (esptool/avrdude) toggle DTR/RTS dozens of
+    // times in a burst and would otherwise flood the dmesg buffer.
+    val now = System.currentTimeMillis()
+    if (now - slot.lastModemLogMs >= 300) {
+      slot.lastModemLogMs = now
+      Kmsg.log("usb-serial: ${slot.ttyName} DTR=${if (slot.dtr) 1 else 0} RTS=${if (slot.rts) 1 else 0}")
+    }
   }
 
   // ── pool lifecycle ──────────────────────────────────────────────────────
@@ -150,11 +158,24 @@ object UsbSerialBridge {
     return arr
   }
 
-  /** (slavePath -> "/dev/ttyUSBn") pairs for ProotManager to bind at launch. */
+  /** (slavePath -> "/dev/ttyUSBn") pairs for ProotManager to bind at launch.
+   *  Slots whose master was closed on detach are recreated here, so every new
+   *  session gets a fresh, live, bindable PTY per port. */
   @Synchronized
   fun bindings(): List<Pair<String, String>> {
     val p = ensurePool() ?: return emptyList()
-    return p.map { it.slavePath to "/dev/${it.ttyName}" }
+    for (slot in p) {
+      if (!slot.alive) {
+        val out = IntArray(1)
+        val slave = Pty.open(out)
+        if (slave != null) {
+          slot.pfd = ParcelFileDescriptor.adoptFd(out[0])
+          slot.slavePath = slave
+          slot.alive = true
+        }
+      }
+    }
+    return p.filter { it.alive }.map { it.slavePath to "/dev/${it.ttyName}" }
   }
 
   // ── device recognition ──────────────────────────────────────────────────
@@ -191,9 +212,10 @@ object UsbSerialBridge {
       Kmsg.log("usb-serial: $id detected (${driver.javaClass.simpleName}) — waiting for USB permission")
       return
     }
-    val slot = p.firstOrNull { it.deviceName == null }
+    // Only slots whose launch-bound PTY is still live can be used this session.
+    val slot = p.firstOrNull { it.deviceName == null && it.alive }
     if (slot == null) {
-      Kmsg.log("usb-serial: $id detected but pool full ($POOL ports in use)")
+      Kmsg.log("usb-serial: $id detected but no free /dev/ttyUSB* this session (open a new tab)")
       return
     }
     val conn = runCatching { usb.openDevice(device) }.getOrNull()
@@ -236,17 +258,23 @@ object UsbSerialBridge {
     controlServer = null
   }
 
-  /** Stop pumping + close the chip, but keep the pool PTY bound for the next plug. */
+  /** Stop pumping, close the chip, and CLOSE the PTY master so a program holding
+   *  /dev/ttyUSB* (screen/picocom) gets EOF and exits cleanly — like a real
+   *  unplug. The slot's PTY is recreated at the next launch (see [bindings]). */
   private fun releaseSlot(slot: Slot, msg: String) {
     slot.running = false
     slot.threads.forEach { it.interrupt() }
     slot.threads.clear()
     runCatching { slot.port?.close() }
     runCatching { slot.conn?.close() }
+    runCatching { slot.pfd.close() }   // -> guest read returns EOF (clean disconnect)
+    slot.alive = false
     slot.port = null
     slot.conn = null
     slot.deviceName = null
     slot.lastParams = null
+    slot.dtr = false
+    slot.rts = false
     Kmsg.log("usb-serial: $msg")
   }
 
