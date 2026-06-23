@@ -619,6 +619,16 @@ public final class TerminalEmulator {
   }
 
   public void processCodePoint(int b) {
+    // While accumulating an OSC string, C0 control bytes are part of the string payload, not
+    // commands to execute. Running them (e.g. LF -> doLinefeed, CR -> column reset) corrupts the
+    // cursor: Claude Code emits an OSC 99 desktop-notification whose multi-line body carries raw
+    // CR/LF, and those leaked line feeds scroll the screen and push the cursor ~2 rows down on
+    // every turn completion, only resyncing on a full redraw (Ctrl+L / app resume). BEL and ST
+    // terminate the string and CAN/SUB abort it, so let those fall through; absorb the rest.
+    if (mEscapeState == ESC_OSC && b < 0x20 && b != 0 && b != 7 && b != 24 && b != 26 && b != 27) {
+      doOsc(b);
+      return;
+    }
     switch (b) {
       case 0: // Null character (NUL, ^@). Do nothing.
         break;
