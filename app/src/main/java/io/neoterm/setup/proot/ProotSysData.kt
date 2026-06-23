@@ -160,10 +160,12 @@ unevictable_pgs_stranded 0
 """.trimStart()
 
   /**
-   * Biztosítja a fake fájlokat, és visszaadja a szükséges proot bind-párokat
-   * (fakePath → realProcPath) azokra a `/proc` célokra, amik az adott eszközön
-   * olvashatatlanok. A valódi, olvasható `/proc` célokat (pl. élő `/proc/stat`)
-   * érintetlenül hagyjuk, hogy a valós CPU-adat átjöjjön.
+   * Biztosítja a fake fájlokat, és visszaadja a proot bind-párokat
+   * (fakePath → realProcPath). Androidon ezek a `/proc` célok szinte mindig
+   * SELinux-zártak, ezért feltétel nélkül bekötjük őket (proot-distro minta),
+   * hogy a `ps`/`top`/`uptime`/`free` mindig működjön. Az `uptime`/`btime`
+   * dinamikusan, a valós eszköz-uptime-ból generálódik; a CPU-terhelés és a
+   * load average statikus marad (a kernel nem adja ki, és nincs rá Android API).
    */
   fun bindings(): List<Pair<String, String>> {
     val dir = File("${NeoTermPath.PROOT_ROOT_PATH}/sysdata")
@@ -190,7 +192,12 @@ unevictable_pgs_stranded 0
       if (e.dynamic || !fake.exists()) {
         runCatching { fake.writeText(e.content) }
       }
-      if (fake.exists() && needsFake(e.real)) {
+      // Mindig bekötjük a fake-et (proot-distro minta). A valódi /proc ezen fájljai
+      // Androidon szinte mindig SELinux-zártak; a korábbi „olvasható-e a valódi?"
+      // feltétel az APP folyamatból mért, de a tényleges olvasó a proot-guest — ha
+      // a kettő eltér (pl. app látja a /proc/uptime-ot, a guest nem), a guest
+      // ENOENT-et kapott. A feltétlen bind ezt kizárja.
+      if (fake.exists()) {
         binds.add(fake.absolutePath to e.real)
       }
     }
@@ -223,21 +230,4 @@ unevictable_pgs_stranded 0
     return STAT.replace(Regex("(?m)^btime .*$"), "btime $btime")
   }
 
-  /**
-   * Csak akkor fake-elünk, ha a valódi /proc cél **olvashatatlan vagy üres**.
-   *
-   * A /proc/stat-ot szándékosan NEM cseréljük le pusztán a hiányzó `btime` sor
-   * miatt: a statikus fake elölné az élő CPU-jiffie-ket, amitől a htop/top
-   * CPU%-a (per-mag és per-process) `N/A`-ra esik. Ha a valódi /proc/stat
-   * olvasható, hagyjuk átjönni az élő tartalmat (valós CPU%); a btime esetleges
-   * hiánya csak egy kozmetikai `ps` „Unable to get system boot time" üzenet.
-   * Ha viszont a kernel (SELinux) tiltja az olvasást, a fake lép életbe.
-   */
-  private fun needsFake(realPath: String): Boolean {
-    return try {
-      File(realPath).readText().isEmpty()
-    } catch (e: Exception) {
-      true
-    }
-  }
 }
