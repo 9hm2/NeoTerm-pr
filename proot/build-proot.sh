@@ -67,21 +67,23 @@ if [[ ! -x "${CC}" ]]; then
   exit 3
 fi
 
-# ─── 1) Tarball download ──────────────────────────────────────────────────
-# A TERMUX FORK-jából buildelünk, NEM az upstream proot-me-ből — utóbbi
-# Android-kernel seccomp-filterén SIGSYS-szel (signal 31) ölte a chrooted
-# processeket (a kernel a ptrace-syscallt blokkolja, az upstream nem tudja
-# kerülni). A Termux fork tartalmazza az ehhez szükséges kernel-hook
-# patcheket (`syscall/seccomp.c`-ben SECCOMP_MODE_FILTER fallback +
-# Android-kompat).
-PROOT_TARBALL="${DL_DIR}/proot-termux-master.tar.gz"
-TALLOC_TARBALL="${DL_DIR}/talloc-${TALLOC_VERSION}.tar.gz"
-
-if [[ ! -f "${PROOT_TARBALL}" ]]; then
-  PROOT_URL="https://github.com/termux/proot/archive/refs/heads/master.tar.gz"
-  echo "[build-proot] download Termux proot fork: ${PROOT_URL}"
-  curl -fL --retry 4 --retry-delay 2 -o "${PROOT_TARBALL}" "${PROOT_URL}"
+# ─── 1) Forrás: proot VENDORELVE a repóban, talloc tarball ────────────────
+# A proot forrást NEM töltjük le build-időben: a Termux fork egy pinnelt
+# másolata a repóban van (proot/vendor/proot, lásd VENDOR.md). Így a build
+# reprodukálható és offline. (A TERMUX forkból buildelünk, NEM az upstream
+# proot-me-ből — utóbbit az Android-kernel seccomp-filtere SIGSYS-szel
+# (signal 31) öli, mert a kernel blokkolja a ptrace-syscallt; a Termux fork
+# tartalmazza az ehhez kellő kernel-hook patcheket.)
+VENDOR_PROOT="${SCRIPT_DIR}/vendor/proot"
+if [[ ! -d "${VENDOR_PROOT}/src" ]]; then
+  echo "[build-proot] HIBA: nincs vendorelt proot forrás: ${VENDOR_PROOT}/src" >&2
+  echo "[build-proot] (lásd proot/vendor/proot/VENDOR.md — a forrást a repó tartalmazza)" >&2
+  exit 2
 fi
+
+# talloc: továbbra is tarball (a samba allocator dependency). Vendorelhető
+# ugyanígy, ha teljesen offline build kell — egyelőre letöltjük + cache-eljük.
+TALLOC_TARBALL="${DL_DIR}/talloc-${TALLOC_VERSION}.tar.gz"
 if [[ ! -f "${TALLOC_TARBALL}" ]]; then
   TALLOC_URL="https://www.samba.org/ftp/talloc/talloc-${TALLOC_VERSION}.tar.gz"
   echo "[build-proot] download talloc src: ${TALLOC_URL}"
@@ -91,11 +93,17 @@ fi
 WORK="${DL_DIR}/build"
 rm -rf "${WORK}"
 mkdir -p "${WORK}"
-( cd "${WORK}" && tar -xzf "${PROOT_TARBALL}" && tar -xzf "${TALLOC_TARBALL}" )
+# proot: a pristine vendor-fát egy friss munkamásolatba másoljuk, mert a build
+# in-place patcheli a forrást (sed a Makefile-on/stat.c-n + a python xattr-patch).
+# Így a vendor-fa érintetlen marad, és ismételt build sem kettőzi a patcheket.
+PROOT_DIR="${WORK}/proot-src"
+mkdir -p "${PROOT_DIR}"
+cp -a "${VENDOR_PROOT}/." "${PROOT_DIR}/"
+# talloc: tarball kibontás a WORK-be.
+( cd "${WORK}" && tar -xzf "${TALLOC_TARBALL}" )
 
-PROOT_DIR=$(find "${WORK}" -maxdepth 2 -type d -name "proot-*" | head -n1)
 TALLOC_DIR=$(find "${WORK}" -maxdepth 2 -type d -name "talloc-*" | head -n1)
-echo "[build-proot] proot src:  ${PROOT_DIR}"
+echo "[build-proot] proot src:  ${PROOT_DIR} (vendor: ${VENDOR_PROOT})"
 echo "[build-proot] talloc src: ${TALLOC_DIR}"
 
 # ─── 2) Build talloc statikusan (csak talloc.c, waf nélkül) ──────────────
