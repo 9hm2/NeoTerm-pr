@@ -159,6 +159,11 @@ object ProotManager {
     args.add("proot")
     args.add("--kill-on-exit")     // a teljes process-fa meghal a tracee után
     args.add("--link2symlink")     // hardlinkek → symlinkek (apt/dpkg kompat)
+    // Emulate System V IPC (shmget/semget/msgget) in user space. Android kernels
+    // disable SysV IPC, so apps that use it fail with ENOSYS ("Function not
+    // implemented") — e.g. PostgreSQL's postmaster interlock segment. The Termux
+    // proot fork implements this; harmless for apps that don't use SysV IPC.
+    args.add("--sysvipc")
     args.add("-0")                 // fake root: a guest uid/gid 0-t lát
     args.add("-r"); args.add(rootfs)
 
