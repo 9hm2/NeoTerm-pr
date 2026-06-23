@@ -1,591 +1,203 @@
 package io.neoterm.backend;
 
 /**
- * Implementation of wcwidth(3) for Unicode 15.
+ * Character display width (wcwidth), ported from KDE Konsole's generated
+ * {@code src/characters/CharacterWidth.cpp} (Unicode 15.0.0; derived from
+ * {@code EastAsianWidth.txt} + {@code emoji-data.txt} with
+ * {@code --emoji=presentation --ambiguous-width=1}).
  *
- * Implementation from https://github.com/jquast/wcwidth but we return 0 for unprintable characters.
+ * <p>This makes our width agree with {@code string-width} (used by Ink / Claude
+ * Code and most modern TUIs): {@code Emoji_Presentation=Yes} code points are
+ * width 2, East-Asian Ambiguous is width 1, conjoining Hangul jamo and the usual
+ * combining/format marks are width 0. A faithful table avoids the cursor drift
+ * that ad-hoc width rules cause when an app manually wraps its output.
  *
- * IMPORTANT:
- * Must be kept in sync with the following:
- * https://github.com/termux/wcwidth
- * https://github.com/termux/libandroid-support
- * https://github.com/termux/termux-packages/tree/master/packages/libandroid-support
+ * <p>Konsole returns -1 for non-printable code points; this port maps that to 0
+ * so {@code width()} never returns negative (callers treat {@code <= 0} as
+ * combining / zero-width). Do not edit the tables by hand — regenerate from the
+ * upstream Unicode data.
  */
 public final class WcWidth {
 
-    // From https://github.com/jquast/wcwidth/blob/master/wcwidth/table_zero.py
-    // from https://github.com/jquast/wcwidth/pull/64
-    // at commit 1b9b6585b0080ea5cb88dc9815796505724793fe (2022-12-16):
-    private static final int[][] ZERO_WIDTH = {
-        {0x00300, 0x0036f},  // Combining Grave Accent  ..Combining Latin Small Le
-        {0x00483, 0x00489},  // Combining Cyrillic Titlo..Combining Cyrillic Milli
-        {0x00591, 0x005bd},  // Hebrew Accent Etnahta   ..Hebrew Point Meteg
-        {0x005bf, 0x005bf},  // Hebrew Point Rafe       ..Hebrew Point Rafe
-        {0x005c1, 0x005c2},  // Hebrew Point Shin Dot   ..Hebrew Point Sin Dot
-        {0x005c4, 0x005c5},  // Hebrew Mark Upper Dot   ..Hebrew Mark Lower Dot
-        {0x005c7, 0x005c7},  // Hebrew Point Qamats Qata..Hebrew Point Qamats Qata
-        {0x00610, 0x0061a},  // Arabic Sign Sallallahou ..Arabic Small Kasra
-        {0x0064b, 0x0065f},  // Arabic Fathatan         ..Arabic Wavy Hamza Below
-        {0x00670, 0x00670},  // Arabic Letter Superscrip..Arabic Letter Superscrip
-        {0x006d6, 0x006dc},  // Arabic Small High Ligatu..Arabic Small High Seen
-        {0x006df, 0x006e4},  // Arabic Small High Rounde..Arabic Small High Madda
-        {0x006e7, 0x006e8},  // Arabic Small High Yeh   ..Arabic Small High Noon
-        {0x006ea, 0x006ed},  // Arabic Empty Centre Low ..Arabic Small Low Meem
-        {0x00711, 0x00711},  // Syriac Letter Superscrip..Syriac Letter Superscrip
-        {0x00730, 0x0074a},  // Syriac Pthaha Above     ..Syriac Barrekh
-        {0x007a6, 0x007b0},  // Thaana Abafili          ..Thaana Sukun
-        {0x007eb, 0x007f3},  // Nko Combining Short High..Nko Combining Double Dot
-        {0x007fd, 0x007fd},  // Nko Dantayalan          ..Nko Dantayalan
-        {0x00816, 0x00819},  // Samaritan Mark In       ..Samaritan Mark Dagesh
-        {0x0081b, 0x00823},  // Samaritan Mark Epentheti..Samaritan Vowel Sign A
-        {0x00825, 0x00827},  // Samaritan Vowel Sign Sho..Samaritan Vowel Sign U
-        {0x00829, 0x0082d},  // Samaritan Vowel Sign Lon..Samaritan Mark Nequdaa
-        {0x00859, 0x0085b},  // Mandaic Affrication Mark..Mandaic Gemination Mark
-        {0x00898, 0x0089f},  // Arabic Small High Word A..Arabic Half Madda Over M
-        {0x008ca, 0x008e1},  // Arabic Small High Farsi ..Arabic Small High Sign S
-        {0x008e3, 0x00902},  // Arabic Turned Damma Belo..Devanagari Sign Anusvara
-        {0x0093a, 0x0093a},  // Devanagari Vowel Sign Oe..Devanagari Vowel Sign Oe
-        {0x0093c, 0x0093c},  // Devanagari Sign Nukta   ..Devanagari Sign Nukta
-        {0x00941, 0x00948},  // Devanagari Vowel Sign U ..Devanagari Vowel Sign Ai
-        {0x0094d, 0x0094d},  // Devanagari Sign Virama  ..Devanagari Sign Virama
-        {0x00951, 0x00957},  // Devanagari Stress Sign U..Devanagari Vowel Sign Uu
-        {0x00962, 0x00963},  // Devanagari Vowel Sign Vo..Devanagari Vowel Sign Vo
-        {0x00981, 0x00981},  // Bengali Sign Candrabindu..Bengali Sign Candrabindu
-        {0x009bc, 0x009bc},  // Bengali Sign Nukta      ..Bengali Sign Nukta
-        {0x009c1, 0x009c4},  // Bengali Vowel Sign U    ..Bengali Vowel Sign Vocal
-        {0x009cd, 0x009cd},  // Bengali Sign Virama     ..Bengali Sign Virama
-        {0x009e2, 0x009e3},  // Bengali Vowel Sign Vocal..Bengali Vowel Sign Vocal
-        {0x009fe, 0x009fe},  // Bengali Sandhi Mark     ..Bengali Sandhi Mark
-        {0x00a01, 0x00a02},  // Gurmukhi Sign Adak Bindi..Gurmukhi Sign Bindi
-        {0x00a3c, 0x00a3c},  // Gurmukhi Sign Nukta     ..Gurmukhi Sign Nukta
-        {0x00a41, 0x00a42},  // Gurmukhi Vowel Sign U   ..Gurmukhi Vowel Sign Uu
-        {0x00a47, 0x00a48},  // Gurmukhi Vowel Sign Ee  ..Gurmukhi Vowel Sign Ai
-        {0x00a4b, 0x00a4d},  // Gurmukhi Vowel Sign Oo  ..Gurmukhi Sign Virama
-        {0x00a51, 0x00a51},  // Gurmukhi Sign Udaat     ..Gurmukhi Sign Udaat
-        {0x00a70, 0x00a71},  // Gurmukhi Tippi          ..Gurmukhi Addak
-        {0x00a75, 0x00a75},  // Gurmukhi Sign Yakash    ..Gurmukhi Sign Yakash
-        {0x00a81, 0x00a82},  // Gujarati Sign Candrabind..Gujarati Sign Anusvara
-        {0x00abc, 0x00abc},  // Gujarati Sign Nukta     ..Gujarati Sign Nukta
-        {0x00ac1, 0x00ac5},  // Gujarati Vowel Sign U   ..Gujarati Vowel Sign Cand
-        {0x00ac7, 0x00ac8},  // Gujarati Vowel Sign E   ..Gujarati Vowel Sign Ai
-        {0x00acd, 0x00acd},  // Gujarati Sign Virama    ..Gujarati Sign Virama
-        {0x00ae2, 0x00ae3},  // Gujarati Vowel Sign Voca..Gujarati Vowel Sign Voca
-        {0x00afa, 0x00aff},  // Gujarati Sign Sukun     ..Gujarati Sign Two-circle
-        {0x00b01, 0x00b01},  // Oriya Sign Candrabindu  ..Oriya Sign Candrabindu
-        {0x00b3c, 0x00b3c},  // Oriya Sign Nukta        ..Oriya Sign Nukta
-        {0x00b3f, 0x00b3f},  // Oriya Vowel Sign I      ..Oriya Vowel Sign I
-        {0x00b41, 0x00b44},  // Oriya Vowel Sign U      ..Oriya Vowel Sign Vocalic
-        {0x00b4d, 0x00b4d},  // Oriya Sign Virama       ..Oriya Sign Virama
-        {0x00b55, 0x00b56},  // Oriya Sign Overline     ..Oriya Ai Length Mark
-        {0x00b62, 0x00b63},  // Oriya Vowel Sign Vocalic..Oriya Vowel Sign Vocalic
-        {0x00b82, 0x00b82},  // Tamil Sign Anusvara     ..Tamil Sign Anusvara
-        {0x00bc0, 0x00bc0},  // Tamil Vowel Sign Ii     ..Tamil Vowel Sign Ii
-        {0x00bcd, 0x00bcd},  // Tamil Sign Virama       ..Tamil Sign Virama
-        {0x00c00, 0x00c00},  // Telugu Sign Combining Ca..Telugu Sign Combining Ca
-        {0x00c04, 0x00c04},  // Telugu Sign Combining An..Telugu Sign Combining An
-        {0x00c3c, 0x00c3c},  // Telugu Sign Nukta       ..Telugu Sign Nukta
-        {0x00c3e, 0x00c40},  // Telugu Vowel Sign Aa    ..Telugu Vowel Sign Ii
-        {0x00c46, 0x00c48},  // Telugu Vowel Sign E     ..Telugu Vowel Sign Ai
-        {0x00c4a, 0x00c4d},  // Telugu Vowel Sign O     ..Telugu Sign Virama
-        {0x00c55, 0x00c56},  // Telugu Length Mark      ..Telugu Ai Length Mark
-        {0x00c62, 0x00c63},  // Telugu Vowel Sign Vocali..Telugu Vowel Sign Vocali
-        {0x00c81, 0x00c81},  // Kannada Sign Candrabindu..Kannada Sign Candrabindu
-        {0x00cbc, 0x00cbc},  // Kannada Sign Nukta      ..Kannada Sign Nukta
-        {0x00cbf, 0x00cbf},  // Kannada Vowel Sign I    ..Kannada Vowel Sign I
-        {0x00cc6, 0x00cc6},  // Kannada Vowel Sign E    ..Kannada Vowel Sign E
-        {0x00ccc, 0x00ccd},  // Kannada Vowel Sign Au   ..Kannada Sign Virama
-        {0x00ce2, 0x00ce3},  // Kannada Vowel Sign Vocal..Kannada Vowel Sign Vocal
-        {0x00d00, 0x00d01},  // Malayalam Sign Combining..Malayalam Sign Candrabin
-        {0x00d3b, 0x00d3c},  // Malayalam Sign Vertical ..Malayalam Sign Circular
-        {0x00d41, 0x00d44},  // Malayalam Vowel Sign U  ..Malayalam Vowel Sign Voc
-        {0x00d4d, 0x00d4d},  // Malayalam Sign Virama   ..Malayalam Sign Virama
-        {0x00d62, 0x00d63},  // Malayalam Vowel Sign Voc..Malayalam Vowel Sign Voc
-        {0x00d81, 0x00d81},  // Sinhala Sign Candrabindu..Sinhala Sign Candrabindu
-        {0x00dca, 0x00dca},  // Sinhala Sign Al-lakuna  ..Sinhala Sign Al-lakuna
-        {0x00dd2, 0x00dd4},  // Sinhala Vowel Sign Ketti..Sinhala Vowel Sign Ketti
-        {0x00dd6, 0x00dd6},  // Sinhala Vowel Sign Diga ..Sinhala Vowel Sign Diga
-        {0x00e31, 0x00e31},  // Thai Character Mai Han-a..Thai Character Mai Han-a
-        {0x00e34, 0x00e3a},  // Thai Character Sara I   ..Thai Character Phinthu
-        {0x00e47, 0x00e4e},  // Thai Character Maitaikhu..Thai Character Yamakkan
-        {0x00eb1, 0x00eb1},  // Lao Vowel Sign Mai Kan  ..Lao Vowel Sign Mai Kan
-        {0x00eb4, 0x00ebc},  // Lao Vowel Sign I        ..Lao Semivowel Sign Lo
-        {0x00ec8, 0x00ece},  // Lao Tone Mai Ek         ..(nil)
-        {0x00f18, 0x00f19},  // Tibetan Astrological Sig..Tibetan Astrological Sig
-        {0x00f35, 0x00f35},  // Tibetan Mark Ngas Bzung ..Tibetan Mark Ngas Bzung
-        {0x00f37, 0x00f37},  // Tibetan Mark Ngas Bzung ..Tibetan Mark Ngas Bzung
-        {0x00f39, 0x00f39},  // Tibetan Mark Tsa -phru  ..Tibetan Mark Tsa -phru
-        {0x00f71, 0x00f7e},  // Tibetan Vowel Sign Aa   ..Tibetan Sign Rjes Su Nga
-        {0x00f80, 0x00f84},  // Tibetan Vowel Sign Rever..Tibetan Mark Halanta
-        {0x00f86, 0x00f87},  // Tibetan Sign Lci Rtags  ..Tibetan Sign Yang Rtags
-        {0x00f8d, 0x00f97},  // Tibetan Subjoined Sign L..Tibetan Subjoined Letter
-        {0x00f99, 0x00fbc},  // Tibetan Subjoined Letter..Tibetan Subjoined Letter
-        {0x00fc6, 0x00fc6},  // Tibetan Symbol Padma Gda..Tibetan Symbol Padma Gda
-        {0x0102d, 0x01030},  // Myanmar Vowel Sign I    ..Myanmar Vowel Sign Uu
-        {0x01032, 0x01037},  // Myanmar Vowel Sign Ai   ..Myanmar Sign Dot Below
-        {0x01039, 0x0103a},  // Myanmar Sign Virama     ..Myanmar Sign Asat
-        {0x0103d, 0x0103e},  // Myanmar Consonant Sign M..Myanmar Consonant Sign M
-        {0x01058, 0x01059},  // Myanmar Vowel Sign Vocal..Myanmar Vowel Sign Vocal
-        {0x0105e, 0x01060},  // Myanmar Consonant Sign M..Myanmar Consonant Sign M
-        {0x01071, 0x01074},  // Myanmar Vowel Sign Geba ..Myanmar Vowel Sign Kayah
-        {0x01082, 0x01082},  // Myanmar Consonant Sign S..Myanmar Consonant Sign S
-        {0x01085, 0x01086},  // Myanmar Vowel Sign Shan ..Myanmar Vowel Sign Shan
-        {0x0108d, 0x0108d},  // Myanmar Sign Shan Counci..Myanmar Sign Shan Counci
-        {0x0109d, 0x0109d},  // Myanmar Vowel Sign Aiton..Myanmar Vowel Sign Aiton
-        {0x0135d, 0x0135f},  // Ethiopic Combining Gemin..Ethiopic Combining Gemin
-        {0x01712, 0x01714},  // Tagalog Vowel Sign I    ..Tagalog Sign Virama
-        {0x01732, 0x01733},  // Hanunoo Vowel Sign I    ..Hanunoo Vowel Sign U
-        {0x01752, 0x01753},  // Buhid Vowel Sign I      ..Buhid Vowel Sign U
-        {0x01772, 0x01773},  // Tagbanwa Vowel Sign I   ..Tagbanwa Vowel Sign U
-        {0x017b4, 0x017b5},  // Khmer Vowel Inherent Aq ..Khmer Vowel Inherent Aa
-        {0x017b7, 0x017bd},  // Khmer Vowel Sign I      ..Khmer Vowel Sign Ua
-        {0x017c6, 0x017c6},  // Khmer Sign Nikahit      ..Khmer Sign Nikahit
-        {0x017c9, 0x017d3},  // Khmer Sign Muusikatoan  ..Khmer Sign Bathamasat
-        {0x017dd, 0x017dd},  // Khmer Sign Atthacan     ..Khmer Sign Atthacan
-        {0x0180b, 0x0180d},  // Mongolian Free Variation..Mongolian Free Variation
-        {0x0180f, 0x0180f},  // Mongolian Free Variation..Mongolian Free Variation
-        {0x01885, 0x01886},  // Mongolian Letter Ali Gal..Mongolian Letter Ali Gal
-        {0x018a9, 0x018a9},  // Mongolian Letter Ali Gal..Mongolian Letter Ali Gal
-        {0x01920, 0x01922},  // Limbu Vowel Sign A      ..Limbu Vowel Sign U
-        {0x01927, 0x01928},  // Limbu Vowel Sign E      ..Limbu Vowel Sign O
-        {0x01932, 0x01932},  // Limbu Small Letter Anusv..Limbu Small Letter Anusv
-        {0x01939, 0x0193b},  // Limbu Sign Mukphreng    ..Limbu Sign Sa-i
-        {0x01a17, 0x01a18},  // Buginese Vowel Sign I   ..Buginese Vowel Sign U
-        {0x01a1b, 0x01a1b},  // Buginese Vowel Sign Ae  ..Buginese Vowel Sign Ae
-        {0x01a56, 0x01a56},  // Tai Tham Consonant Sign ..Tai Tham Consonant Sign
-        {0x01a58, 0x01a5e},  // Tai Tham Sign Mai Kang L..Tai Tham Consonant Sign
-        {0x01a60, 0x01a60},  // Tai Tham Sign Sakot     ..Tai Tham Sign Sakot
-        {0x01a62, 0x01a62},  // Tai Tham Vowel Sign Mai ..Tai Tham Vowel Sign Mai
-        {0x01a65, 0x01a6c},  // Tai Tham Vowel Sign I   ..Tai Tham Vowel Sign Oa B
-        {0x01a73, 0x01a7c},  // Tai Tham Vowel Sign Oa A..Tai Tham Sign Khuen-lue
-        {0x01a7f, 0x01a7f},  // Tai Tham Combining Crypt..Tai Tham Combining Crypt
-        {0x01ab0, 0x01ace},  // Combining Doubled Circum..Combining Latin Small Le
-        {0x01b00, 0x01b03},  // Balinese Sign Ulu Ricem ..Balinese Sign Surang
-        {0x01b34, 0x01b34},  // Balinese Sign Rerekan   ..Balinese Sign Rerekan
-        {0x01b36, 0x01b3a},  // Balinese Vowel Sign Ulu ..Balinese Vowel Sign Ra R
-        {0x01b3c, 0x01b3c},  // Balinese Vowel Sign La L..Balinese Vowel Sign La L
-        {0x01b42, 0x01b42},  // Balinese Vowel Sign Pepe..Balinese Vowel Sign Pepe
-        {0x01b6b, 0x01b73},  // Balinese Musical Symbol ..Balinese Musical Symbol
-        {0x01b80, 0x01b81},  // Sundanese Sign Panyecek ..Sundanese Sign Panglayar
-        {0x01ba2, 0x01ba5},  // Sundanese Consonant Sign..Sundanese Vowel Sign Pan
-        {0x01ba8, 0x01ba9},  // Sundanese Vowel Sign Pam..Sundanese Vowel Sign Pan
-        {0x01bab, 0x01bad},  // Sundanese Sign Virama   ..Sundanese Consonant Sign
-        {0x01be6, 0x01be6},  // Batak Sign Tompi        ..Batak Sign Tompi
-        {0x01be8, 0x01be9},  // Batak Vowel Sign Pakpak ..Batak Vowel Sign Ee
-        {0x01bed, 0x01bed},  // Batak Vowel Sign Karo O ..Batak Vowel Sign Karo O
-        {0x01bef, 0x01bf1},  // Batak Vowel Sign U For S..Batak Consonant Sign H
-        {0x01c2c, 0x01c33},  // Lepcha Vowel Sign E     ..Lepcha Consonant Sign T
-        {0x01c36, 0x01c37},  // Lepcha Sign Ran         ..Lepcha Sign Nukta
-        {0x01cd0, 0x01cd2},  // Vedic Tone Karshana     ..Vedic Tone Prenkha
-        {0x01cd4, 0x01ce0},  // Vedic Sign Yajurvedic Mi..Vedic Tone Rigvedic Kash
-        {0x01ce2, 0x01ce8},  // Vedic Sign Visarga Svari..Vedic Sign Visarga Anuda
-        {0x01ced, 0x01ced},  // Vedic Sign Tiryak       ..Vedic Sign Tiryak
-        {0x01cf4, 0x01cf4},  // Vedic Tone Candra Above ..Vedic Tone Candra Above
-        {0x01cf8, 0x01cf9},  // Vedic Tone Ring Above   ..Vedic Tone Double Ring A
-        {0x01dc0, 0x01dff},  // Combining Dotted Grave A..Combining Right Arrowhea
-        {0x020d0, 0x020f0},  // Combining Left Harpoon A..Combining Asterisk Above
-        {0x02cef, 0x02cf1},  // Coptic Combining Ni Abov..Coptic Combining Spiritu
-        {0x02d7f, 0x02d7f},  // Tifinagh Consonant Joine..Tifinagh Consonant Joine
-        {0x02de0, 0x02dff},  // Combining Cyrillic Lette..Combining Cyrillic Lette
-        {0x0302a, 0x0302d},  // Ideographic Level Tone M..Ideographic Entering Ton
-        {0x03099, 0x0309a},  // Combining Katakana-hirag..Combining Katakana-hirag
-        {0x0a66f, 0x0a672},  // Combining Cyrillic Vzmet..Combining Cyrillic Thous
-        {0x0a674, 0x0a67d},  // Combining Cyrillic Lette..Combining Cyrillic Payer
-        {0x0a69e, 0x0a69f},  // Combining Cyrillic Lette..Combining Cyrillic Lette
-        {0x0a6f0, 0x0a6f1},  // Bamum Combining Mark Koq..Bamum Combining Mark Tuk
-        {0x0a802, 0x0a802},  // Syloti Nagri Sign Dvisva..Syloti Nagri Sign Dvisva
-        {0x0a806, 0x0a806},  // Syloti Nagri Sign Hasant..Syloti Nagri Sign Hasant
-        {0x0a80b, 0x0a80b},  // Syloti Nagri Sign Anusva..Syloti Nagri Sign Anusva
-        {0x0a825, 0x0a826},  // Syloti Nagri Vowel Sign ..Syloti Nagri Vowel Sign
-        {0x0a82c, 0x0a82c},  // Syloti Nagri Sign Altern..Syloti Nagri Sign Altern
-        {0x0a8c4, 0x0a8c5},  // Saurashtra Sign Virama  ..Saurashtra Sign Candrabi
-        {0x0a8e0, 0x0a8f1},  // Combining Devanagari Dig..Combining Devanagari Sig
-        {0x0a8ff, 0x0a8ff},  // Devanagari Vowel Sign Ay..Devanagari Vowel Sign Ay
-        {0x0a926, 0x0a92d},  // Kayah Li Vowel Ue       ..Kayah Li Tone Calya Plop
-        {0x0a947, 0x0a951},  // Rejang Vowel Sign I     ..Rejang Consonant Sign R
-        {0x0a980, 0x0a982},  // Javanese Sign Panyangga ..Javanese Sign Layar
-        {0x0a9b3, 0x0a9b3},  // Javanese Sign Cecak Telu..Javanese Sign Cecak Telu
-        {0x0a9b6, 0x0a9b9},  // Javanese Vowel Sign Wulu..Javanese Vowel Sign Suku
-        {0x0a9bc, 0x0a9bd},  // Javanese Vowel Sign Pepe..Javanese Consonant Sign
-        {0x0a9e5, 0x0a9e5},  // Myanmar Sign Shan Saw   ..Myanmar Sign Shan Saw
-        {0x0aa29, 0x0aa2e},  // Cham Vowel Sign Aa      ..Cham Vowel Sign Oe
-        {0x0aa31, 0x0aa32},  // Cham Vowel Sign Au      ..Cham Vowel Sign Ue
-        {0x0aa35, 0x0aa36},  // Cham Consonant Sign La  ..Cham Consonant Sign Wa
-        {0x0aa43, 0x0aa43},  // Cham Consonant Sign Fina..Cham Consonant Sign Fina
-        {0x0aa4c, 0x0aa4c},  // Cham Consonant Sign Fina..Cham Consonant Sign Fina
-        {0x0aa7c, 0x0aa7c},  // Myanmar Sign Tai Laing T..Myanmar Sign Tai Laing T
-        {0x0aab0, 0x0aab0},  // Tai Viet Mai Kang       ..Tai Viet Mai Kang
-        {0x0aab2, 0x0aab4},  // Tai Viet Vowel I        ..Tai Viet Vowel U
-        {0x0aab7, 0x0aab8},  // Tai Viet Mai Khit       ..Tai Viet Vowel Ia
-        {0x0aabe, 0x0aabf},  // Tai Viet Vowel Am       ..Tai Viet Tone Mai Ek
-        {0x0aac1, 0x0aac1},  // Tai Viet Tone Mai Tho   ..Tai Viet Tone Mai Tho
-        {0x0aaec, 0x0aaed},  // Meetei Mayek Vowel Sign ..Meetei Mayek Vowel Sign
-        {0x0aaf6, 0x0aaf6},  // Meetei Mayek Virama     ..Meetei Mayek Virama
-        {0x0abe5, 0x0abe5},  // Meetei Mayek Vowel Sign ..Meetei Mayek Vowel Sign
-        {0x0abe8, 0x0abe8},  // Meetei Mayek Vowel Sign ..Meetei Mayek Vowel Sign
-        {0x0abed, 0x0abed},  // Meetei Mayek Apun Iyek  ..Meetei Mayek Apun Iyek
-        {0x0fb1e, 0x0fb1e},  // Hebrew Point Judeo-spani..Hebrew Point Judeo-spani
-        {0x0fe00, 0x0fe0f},  // Variation Selector-1    ..Variation Selector-16
-        {0x0fe20, 0x0fe2f},  // Combining Ligature Left ..Combining Cyrillic Titlo
-        {0x101fd, 0x101fd},  // Phaistos Disc Sign Combi..Phaistos Disc Sign Combi
-        {0x102e0, 0x102e0},  // Coptic Epact Thousands M..Coptic Epact Thousands M
-        {0x10376, 0x1037a},  // Combining Old Permic Let..Combining Old Permic Let
-        {0x10a01, 0x10a03},  // Kharoshthi Vowel Sign I ..Kharoshthi Vowel Sign Vo
-        {0x10a05, 0x10a06},  // Kharoshthi Vowel Sign E ..Kharoshthi Vowel Sign O
-        {0x10a0c, 0x10a0f},  // Kharoshthi Vowel Length ..Kharoshthi Sign Visarga
-        {0x10a38, 0x10a3a},  // Kharoshthi Sign Bar Abov..Kharoshthi Sign Dot Belo
-        {0x10a3f, 0x10a3f},  // Kharoshthi Virama       ..Kharoshthi Virama
-        {0x10ae5, 0x10ae6},  // Manichaean Abbreviation ..Manichaean Abbreviation
-        {0x10d24, 0x10d27},  // Hanifi Rohingya Sign Har..Hanifi Rohingya Sign Tas
-        {0x10eab, 0x10eac},  // Yezidi Combining Hamza M..Yezidi Combining Madda M
-        {0x10efd, 0x10eff},  // (nil)                   ..(nil)
-        {0x10f46, 0x10f50},  // Sogdian Combining Dot Be..Sogdian Combining Stroke
-        {0x10f82, 0x10f85},  // Old Uyghur Combining Dot..Old Uyghur Combining Two
-        {0x11001, 0x11001},  // Brahmi Sign Anusvara    ..Brahmi Sign Anusvara
-        {0x11038, 0x11046},  // Brahmi Vowel Sign Aa    ..Brahmi Virama
-        {0x11070, 0x11070},  // Brahmi Sign Old Tamil Vi..Brahmi Sign Old Tamil Vi
-        {0x11073, 0x11074},  // Brahmi Vowel Sign Old Ta..Brahmi Vowel Sign Old Ta
-        {0x1107f, 0x11081},  // Brahmi Number Joiner    ..Kaithi Sign Anusvara
-        {0x110b3, 0x110b6},  // Kaithi Vowel Sign U     ..Kaithi Vowel Sign Ai
-        {0x110b9, 0x110ba},  // Kaithi Sign Virama      ..Kaithi Sign Nukta
-        {0x110c2, 0x110c2},  // Kaithi Vowel Sign Vocali..Kaithi Vowel Sign Vocali
-        {0x11100, 0x11102},  // Chakma Sign Candrabindu ..Chakma Sign Visarga
-        {0x11127, 0x1112b},  // Chakma Vowel Sign A     ..Chakma Vowel Sign Uu
-        {0x1112d, 0x11134},  // Chakma Vowel Sign Ai    ..Chakma Maayyaa
-        {0x11173, 0x11173},  // Mahajani Sign Nukta     ..Mahajani Sign Nukta
-        {0x11180, 0x11181},  // Sharada Sign Candrabindu..Sharada Sign Anusvara
-        {0x111b6, 0x111be},  // Sharada Vowel Sign U    ..Sharada Vowel Sign O
-        {0x111c9, 0x111cc},  // Sharada Sandhi Mark     ..Sharada Extra Short Vowe
-        {0x111cf, 0x111cf},  // Sharada Sign Inverted Ca..Sharada Sign Inverted Ca
-        {0x1122f, 0x11231},  // Khojki Vowel Sign U     ..Khojki Vowel Sign Ai
-        {0x11234, 0x11234},  // Khojki Sign Anusvara    ..Khojki Sign Anusvara
-        {0x11236, 0x11237},  // Khojki Sign Nukta       ..Khojki Sign Shadda
-        {0x1123e, 0x1123e},  // Khojki Sign Sukun       ..Khojki Sign Sukun
-        {0x11241, 0x11241},  // (nil)                   ..(nil)
-        {0x112df, 0x112df},  // Khudawadi Sign Anusvara ..Khudawadi Sign Anusvara
-        {0x112e3, 0x112ea},  // Khudawadi Vowel Sign U  ..Khudawadi Sign Virama
-        {0x11300, 0x11301},  // Grantha Sign Combining A..Grantha Sign Candrabindu
-        {0x1133b, 0x1133c},  // Combining Bindu Below   ..Grantha Sign Nukta
-        {0x11340, 0x11340},  // Grantha Vowel Sign Ii   ..Grantha Vowel Sign Ii
-        {0x11366, 0x1136c},  // Combining Grantha Digit ..Combining Grantha Digit
-        {0x11370, 0x11374},  // Combining Grantha Letter..Combining Grantha Letter
-        {0x11438, 0x1143f},  // Newa Vowel Sign U       ..Newa Vowel Sign Ai
-        {0x11442, 0x11444},  // Newa Sign Virama        ..Newa Sign Anusvara
-        {0x11446, 0x11446},  // Newa Sign Nukta         ..Newa Sign Nukta
-        {0x1145e, 0x1145e},  // Newa Sandhi Mark        ..Newa Sandhi Mark
-        {0x114b3, 0x114b8},  // Tirhuta Vowel Sign U    ..Tirhuta Vowel Sign Vocal
-        {0x114ba, 0x114ba},  // Tirhuta Vowel Sign Short..Tirhuta Vowel Sign Short
-        {0x114bf, 0x114c0},  // Tirhuta Sign Candrabindu..Tirhuta Sign Anusvara
-        {0x114c2, 0x114c3},  // Tirhuta Sign Virama     ..Tirhuta Sign Nukta
-        {0x115b2, 0x115b5},  // Siddham Vowel Sign U    ..Siddham Vowel Sign Vocal
-        {0x115bc, 0x115bd},  // Siddham Sign Candrabindu..Siddham Sign Anusvara
-        {0x115bf, 0x115c0},  // Siddham Sign Virama     ..Siddham Sign Nukta
-        {0x115dc, 0x115dd},  // Siddham Vowel Sign Alter..Siddham Vowel Sign Alter
-        {0x11633, 0x1163a},  // Modi Vowel Sign U       ..Modi Vowel Sign Ai
-        {0x1163d, 0x1163d},  // Modi Sign Anusvara      ..Modi Sign Anusvara
-        {0x1163f, 0x11640},  // Modi Sign Virama        ..Modi Sign Ardhacandra
-        {0x116ab, 0x116ab},  // Takri Sign Anusvara     ..Takri Sign Anusvara
-        {0x116ad, 0x116ad},  // Takri Vowel Sign Aa     ..Takri Vowel Sign Aa
-        {0x116b0, 0x116b5},  // Takri Vowel Sign U      ..Takri Vowel Sign Au
-        {0x116b7, 0x116b7},  // Takri Sign Nukta        ..Takri Sign Nukta
-        {0x1171d, 0x1171f},  // Ahom Consonant Sign Medi..Ahom Consonant Sign Medi
-        {0x11722, 0x11725},  // Ahom Vowel Sign I       ..Ahom Vowel Sign Uu
-        {0x11727, 0x1172b},  // Ahom Vowel Sign Aw      ..Ahom Sign Killer
-        {0x1182f, 0x11837},  // Dogra Vowel Sign U      ..Dogra Sign Anusvara
-        {0x11839, 0x1183a},  // Dogra Sign Virama       ..Dogra Sign Nukta
-        {0x1193b, 0x1193c},  // Dives Akuru Sign Anusvar..Dives Akuru Sign Candrab
-        {0x1193e, 0x1193e},  // Dives Akuru Virama      ..Dives Akuru Virama
-        {0x11943, 0x11943},  // Dives Akuru Sign Nukta  ..Dives Akuru Sign Nukta
-        {0x119d4, 0x119d7},  // Nandinagari Vowel Sign U..Nandinagari Vowel Sign V
-        {0x119da, 0x119db},  // Nandinagari Vowel Sign E..Nandinagari Vowel Sign A
-        {0x119e0, 0x119e0},  // Nandinagari Sign Virama ..Nandinagari Sign Virama
-        {0x11a01, 0x11a0a},  // Zanabazar Square Vowel S..Zanabazar Square Vowel L
-        {0x11a33, 0x11a38},  // Zanabazar Square Final C..Zanabazar Square Sign An
-        {0x11a3b, 0x11a3e},  // Zanabazar Square Cluster..Zanabazar Square Cluster
-        {0x11a47, 0x11a47},  // Zanabazar Square Subjoin..Zanabazar Square Subjoin
-        {0x11a51, 0x11a56},  // Soyombo Vowel Sign I    ..Soyombo Vowel Sign Oe
-        {0x11a59, 0x11a5b},  // Soyombo Vowel Sign Vocal..Soyombo Vowel Length Mar
-        {0x11a8a, 0x11a96},  // Soyombo Final Consonant ..Soyombo Sign Anusvara
-        {0x11a98, 0x11a99},  // Soyombo Gemination Mark ..Soyombo Subjoiner
-        {0x11c30, 0x11c36},  // Bhaiksuki Vowel Sign I  ..Bhaiksuki Vowel Sign Voc
-        {0x11c38, 0x11c3d},  // Bhaiksuki Vowel Sign E  ..Bhaiksuki Sign Anusvara
-        {0x11c3f, 0x11c3f},  // Bhaiksuki Sign Virama   ..Bhaiksuki Sign Virama
-        {0x11c92, 0x11ca7},  // Marchen Subjoined Letter..Marchen Subjoined Letter
-        {0x11caa, 0x11cb0},  // Marchen Subjoined Letter..Marchen Vowel Sign Aa
-        {0x11cb2, 0x11cb3},  // Marchen Vowel Sign U    ..Marchen Vowel Sign E
-        {0x11cb5, 0x11cb6},  // Marchen Sign Anusvara   ..Marchen Sign Candrabindu
-        {0x11d31, 0x11d36},  // Masaram Gondi Vowel Sign..Masaram Gondi Vowel Sign
-        {0x11d3a, 0x11d3a},  // Masaram Gondi Vowel Sign..Masaram Gondi Vowel Sign
-        {0x11d3c, 0x11d3d},  // Masaram Gondi Vowel Sign..Masaram Gondi Vowel Sign
-        {0x11d3f, 0x11d45},  // Masaram Gondi Vowel Sign..Masaram Gondi Virama
-        {0x11d47, 0x11d47},  // Masaram Gondi Ra-kara   ..Masaram Gondi Ra-kara
-        {0x11d90, 0x11d91},  // Gunjala Gondi Vowel Sign..Gunjala Gondi Vowel Sign
-        {0x11d95, 0x11d95},  // Gunjala Gondi Sign Anusv..Gunjala Gondi Sign Anusv
-        {0x11d97, 0x11d97},  // Gunjala Gondi Virama    ..Gunjala Gondi Virama
-        {0x11ef3, 0x11ef4},  // Makasar Vowel Sign I    ..Makasar Vowel Sign U
-        {0x11f00, 0x11f01},  // (nil)                   ..(nil)
-        {0x11f36, 0x11f3a},  // (nil)                   ..(nil)
-        {0x11f40, 0x11f40},  // (nil)                   ..(nil)
-        {0x11f42, 0x11f42},  // (nil)                   ..(nil)
-        {0x13440, 0x13440},  // (nil)                   ..(nil)
-        {0x13447, 0x13455},  // (nil)                   ..(nil)
-        {0x16af0, 0x16af4},  // Bassa Vah Combining High..Bassa Vah Combining High
-        {0x16b30, 0x16b36},  // Pahawh Hmong Mark Cim Tu..Pahawh Hmong Mark Cim Ta
-        {0x16f4f, 0x16f4f},  // Miao Sign Consonant Modi..Miao Sign Consonant Modi
-        {0x16f8f, 0x16f92},  // Miao Tone Right         ..Miao Tone Below
-        {0x16fe4, 0x16fe4},  // Khitan Small Script Fill..Khitan Small Script Fill
-        {0x1bc9d, 0x1bc9e},  // Duployan Thick Letter Se..Duployan Double Mark
-        {0x1cf00, 0x1cf2d},  // Znamenny Combining Mark ..Znamenny Combining Mark
-        {0x1cf30, 0x1cf46},  // Znamenny Combining Tonal..Znamenny Priznak Modifie
-        {0x1d167, 0x1d169},  // Musical Symbol Combining..Musical Symbol Combining
-        {0x1d17b, 0x1d182},  // Musical Symbol Combining..Musical Symbol Combining
-        {0x1d185, 0x1d18b},  // Musical Symbol Combining..Musical Symbol Combining
-        {0x1d1aa, 0x1d1ad},  // Musical Symbol Combining..Musical Symbol Combining
-        {0x1d242, 0x1d244},  // Combining Greek Musical ..Combining Greek Musical
-        {0x1da00, 0x1da36},  // Signwriting Head Rim    ..Signwriting Air Sucking
-        {0x1da3b, 0x1da6c},  // Signwriting Mouth Closed..Signwriting Excitement
-        {0x1da75, 0x1da75},  // Signwriting Upper Body T..Signwriting Upper Body T
-        {0x1da84, 0x1da84},  // Signwriting Location Hea..Signwriting Location Hea
-        {0x1da9b, 0x1da9f},  // Signwriting Fill Modifie..Signwriting Fill Modifie
-        {0x1daa1, 0x1daaf},  // Signwriting Rotation Mod..Signwriting Rotation Mod
-        {0x1e000, 0x1e006},  // Combining Glagolitic Let..Combining Glagolitic Let
-        {0x1e008, 0x1e018},  // Combining Glagolitic Let..Combining Glagolitic Let
-        {0x1e01b, 0x1e021},  // Combining Glagolitic Let..Combining Glagolitic Let
-        {0x1e023, 0x1e024},  // Combining Glagolitic Let..Combining Glagolitic Let
-        {0x1e026, 0x1e02a},  // Combining Glagolitic Let..Combining Glagolitic Let
-        {0x1e08f, 0x1e08f},  // (nil)                   ..(nil)
-        {0x1e130, 0x1e136},  // Nyiakeng Puachue Hmong T..Nyiakeng Puachue Hmong T
-        {0x1e2ae, 0x1e2ae},  // Toto Sign Rising Tone   ..Toto Sign Rising Tone
-        {0x1e2ec, 0x1e2ef},  // Wancho Tone Tup         ..Wancho Tone Koini
-        {0x1e4ec, 0x1e4ef},  // (nil)                   ..(nil)
-        {0x1e8d0, 0x1e8d6},  // Mende Kikakui Combining ..Mende Kikakui Combining
-        {0x1e944, 0x1e94a},  // Adlam Alif Lengthener   ..Adlam Nukta
-        {0xe0100, 0xe01ef},  // Variation Selector-17   ..Variation Selector-256
+    private WcWidth() {}
+
+    /** Direct width lookup for U+0000..U+00FF (-1 = non-printable, mapped to 0 by {@link #width(int)}). */
+    private static final byte[] DIRECT_LUT = {
+    0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     };
 
-    // https://github.com/jquast/wcwidth/blob/master/wcwidth/table_wide.py
-    // from https://github.com/jquast/wcwidth/pull/64
-    // at commit 1b9b6585b0080ea5cb88dc9815796505724793fe (2022-12-16):
-    private static final int[][] WIDE_EASTASIAN = {
-        {0x01100, 0x0115f},  // Hangul Choseong Kiyeok  ..Hangul Choseong Filler
-        {0x0231a, 0x0231b},  // Watch                   ..Hourglass
-        {0x02329, 0x0232a},  // Left-pointing Angle Brac..Right-pointing Angle Bra
-        {0x023e9, 0x023ec},  // Black Right-pointing Dou..Black Down-pointing Doub
-        {0x023f0, 0x023f0},  // Alarm Clock             ..Alarm Clock
-        {0x023f3, 0x023f3},  // Hourglass With Flowing S..Hourglass With Flowing S
-        {0x025fd, 0x025fe},  // White Medium Small Squar..Black Medium Small Squar
-        {0x02614, 0x02615},  // Umbrella With Rain Drops..Hot Beverage
-        {0x02648, 0x02653},  // Aries                   ..Pisces
-        {0x0267f, 0x0267f},  // Wheelchair Symbol       ..Wheelchair Symbol
-        {0x02693, 0x02693},  // Anchor                  ..Anchor
-        {0x026a1, 0x026a1},  // High Voltage Sign       ..High Voltage Sign
-        {0x026aa, 0x026ab},  // Medium White Circle     ..Medium Black Circle
-        {0x026bd, 0x026be},  // Soccer Ball             ..Baseball
-        {0x026c4, 0x026c5},  // Snowman Without Snow    ..Sun Behind Cloud
-        {0x026ce, 0x026ce},  // Ophiuchus               ..Ophiuchus
-        {0x026d4, 0x026d4},  // No Entry                ..No Entry
-        {0x026ea, 0x026ea},  // Church                  ..Church
-        {0x026f2, 0x026f3},  // Fountain                ..Flag In Hole
-        {0x026f5, 0x026f5},  // Sailboat                ..Sailboat
-        {0x026fa, 0x026fa},  // Tent                    ..Tent
-        {0x026fd, 0x026fd},  // Fuel Pump               ..Fuel Pump
-        {0x02705, 0x02705},  // White Heavy Check Mark  ..White Heavy Check Mark
-        {0x0270a, 0x0270b},  // Raised Fist             ..Raised Hand
-        {0x02728, 0x02728},  // Sparkles                ..Sparkles
-        {0x0274c, 0x0274c},  // Cross Mark              ..Cross Mark
-        {0x0274e, 0x0274e},  // Negative Squared Cross M..Negative Squared Cross M
-        {0x02753, 0x02755},  // Black Question Mark Orna..White Exclamation Mark O
-        {0x02757, 0x02757},  // Heavy Exclamation Mark S..Heavy Exclamation Mark S
-        {0x02795, 0x02797},  // Heavy Plus Sign         ..Heavy Division Sign
-        {0x027b0, 0x027b0},  // Curly Loop              ..Curly Loop
-        {0x027bf, 0x027bf},  // Double Curly Loop       ..Double Curly Loop
-        {0x02b1b, 0x02b1c},  // Black Large Square      ..White Large Square
-        {0x02b50, 0x02b50},  // White Medium Star       ..White Medium Star
-        {0x02b55, 0x02b55},  // Heavy Large Circle      ..Heavy Large Circle
-        {0x02e80, 0x02e99},  // Cjk Radical Repeat      ..Cjk Radical Rap
-        {0x02e9b, 0x02ef3},  // Cjk Radical Choke       ..Cjk Radical C-simplified
-        {0x02f00, 0x02fd5},  // Kangxi Radical One      ..Kangxi Radical Flute
-        {0x02ff0, 0x02ffb},  // Ideographic Description ..Ideographic Description
-        {0x03000, 0x0303e},  // Ideographic Space       ..Ideographic Variation In
-        {0x03041, 0x03096},  // Hiragana Letter Small A ..Hiragana Letter Small Ke
-        {0x03099, 0x030ff},  // Combining Katakana-hirag..Katakana Digraph Koto
-        {0x03105, 0x0312f},  // Bopomofo Letter B       ..Bopomofo Letter Nn
-        {0x03131, 0x0318e},  // Hangul Letter Kiyeok    ..Hangul Letter Araeae
-        {0x03190, 0x031e3},  // Ideographic Annotation L..Cjk Stroke Q
-        {0x031f0, 0x0321e},  // Katakana Letter Small Ku..Parenthesized Korean Cha
-        {0x03220, 0x03247},  // Parenthesized Ideograph ..Circled Ideograph Koto
-        {0x03250, 0x04dbf},  // Partnership Sign        ..Cjk Unified Ideograph-4d
-        {0x04e00, 0x0a48c},  // Cjk Unified Ideograph-4e..Yi Syllable Yyr
-        {0x0a490, 0x0a4c6},  // Yi Radical Qot          ..Yi Radical Ke
-        {0x0a960, 0x0a97c},  // Hangul Choseong Tikeut-m..Hangul Choseong Ssangyeo
-        {0x0ac00, 0x0d7a3},  // Hangul Syllable Ga      ..Hangul Syllable Hih
-        {0x0f900, 0x0faff},  // Cjk Compatibility Ideogr..(nil)
-        {0x0fe10, 0x0fe19},  // Presentation Form For Ve..Presentation Form For Ve
-        {0x0fe30, 0x0fe52},  // Presentation Form For Ve..Small Full Stop
-        {0x0fe54, 0x0fe66},  // Small Semicolon         ..Small Equals Sign
-        {0x0fe68, 0x0fe6b},  // Small Reverse Solidus   ..Small Commercial At
-        {0x0ff01, 0x0ff60},  // Fullwidth Exclamation Ma..Fullwidth Right White Pa
-        {0x0ffe0, 0x0ffe6},  // Fullwidth Cent Sign     ..Fullwidth Won Sign
-        {0x16fe0, 0x16fe4},  // Tangut Iteration Mark   ..Khitan Small Script Fill
-        {0x16ff0, 0x16ff1},  // Vietnamese Alternate Rea..Vietnamese Alternate Rea
-        {0x17000, 0x187f7},  // (nil)                   ..(nil)
-        {0x18800, 0x18cd5},  // Tangut Component-001    ..Khitan Small Script Char
-        {0x18d00, 0x18d08},  // (nil)                   ..(nil)
-        {0x1aff0, 0x1aff3},  // Katakana Letter Minnan T..Katakana Letter Minnan T
-        {0x1aff5, 0x1affb},  // Katakana Letter Minnan T..Katakana Letter Minnan N
-        {0x1affd, 0x1affe},  // Katakana Letter Minnan N..Katakana Letter Minnan N
-        {0x1b000, 0x1b122},  // Katakana Letter Archaic ..Katakana Letter Archaic
-        {0x1b132, 0x1b132},  // (nil)                   ..(nil)
-        {0x1b150, 0x1b152},  // Hiragana Letter Small Wi..Hiragana Letter Small Wo
-        {0x1b155, 0x1b155},  // (nil)                   ..(nil)
-        {0x1b164, 0x1b167},  // Katakana Letter Small Wi..Katakana Letter Small N
-        {0x1b170, 0x1b2fb},  // Nushu Character-1b170   ..Nushu Character-1b2fb
-        {0x1f004, 0x1f004},  // Mahjong Tile Red Dragon ..Mahjong Tile Red Dragon
-        {0x1f0cf, 0x1f0cf},  // Playing Card Black Joker..Playing Card Black Joker
-        {0x1f18e, 0x1f18e},  // Negative Squared Ab     ..Negative Squared Ab
-        {0x1f191, 0x1f19a},  // Squared Cl              ..Squared Vs
-        {0x1f200, 0x1f202},  // Square Hiragana Hoka    ..Squared Katakana Sa
-        {0x1f210, 0x1f23b},  // Squared Cjk Unified Ideo..Squared Cjk Unified Ideo
-        {0x1f240, 0x1f248},  // Tortoise Shell Bracketed..Tortoise Shell Bracketed
-        {0x1f250, 0x1f251},  // Circled Ideograph Advant..Circled Ideograph Accept
-        {0x1f260, 0x1f265},  // Rounded Symbol For Fu   ..Rounded Symbol For Cai
-        {0x1f300, 0x1f320},  // Cyclone                 ..Shooting Star
-        {0x1f32d, 0x1f335},  // Hot Dog                 ..Cactus
-        {0x1f337, 0x1f37c},  // Tulip                   ..Baby Bottle
-        {0x1f37e, 0x1f393},  // Bottle With Popping Cork..Graduation Cap
-        {0x1f3a0, 0x1f3ca},  // Carousel Horse          ..Swimmer
-        {0x1f3cf, 0x1f3d3},  // Cricket Bat And Ball    ..Table Tennis Paddle And
-        {0x1f3e0, 0x1f3f0},  // House Building          ..European Castle
-        {0x1f3f4, 0x1f3f4},  // Waving Black Flag       ..Waving Black Flag
-        {0x1f3f8, 0x1f43e},  // Badminton Racquet And Sh..Paw Prints
-        {0x1f440, 0x1f440},  // Eyes                    ..Eyes
-        {0x1f442, 0x1f4fc},  // Ear                     ..Videocassette
-        {0x1f4ff, 0x1f53d},  // Prayer Beads            ..Down-pointing Small Red
-        {0x1f54b, 0x1f54e},  // Kaaba                   ..Menorah With Nine Branch
-        {0x1f550, 0x1f567},  // Clock Face One Oclock   ..Clock Face Twelve-thirty
-        {0x1f57a, 0x1f57a},  // Man Dancing             ..Man Dancing
-        {0x1f595, 0x1f596},  // Reversed Hand With Middl..Raised Hand With Part Be
-        {0x1f5a4, 0x1f5a4},  // Black Heart             ..Black Heart
-        {0x1f5fb, 0x1f64f},  // Mount Fuji              ..Person With Folded Hands
-        {0x1f680, 0x1f6c5},  // Rocket                  ..Left Luggage
-        {0x1f6cc, 0x1f6cc},  // Sleeping Accommodation  ..Sleeping Accommodation
-        {0x1f6d0, 0x1f6d2},  // Place Of Worship        ..Shopping Trolley
-        {0x1f6d5, 0x1f6d7},  // Hindu Temple            ..Elevator
-        {0x1f6dc, 0x1f6df},  // (nil)                   ..Ring Buoy
-        {0x1f6eb, 0x1f6ec},  // Airplane Departure      ..Airplane Arriving
-        {0x1f6f4, 0x1f6fc},  // Scooter                 ..Roller Skate
-        {0x1f7e0, 0x1f7eb},  // Large Orange Circle     ..Large Brown Square
-        {0x1f7f0, 0x1f7f0},  // Heavy Equals Sign       ..Heavy Equals Sign
-        {0x1f90c, 0x1f93a},  // Pinched Fingers         ..Fencer
-        {0x1f93c, 0x1f945},  // Wrestlers               ..Goal Net
-        {0x1f947, 0x1f9ff},  // First Place Medal       ..Nazar Amulet
-        {0x1fa70, 0x1fa7c},  // Ballet Shoes            ..Crutch
-        {0x1fa80, 0x1fa88},  // Yo-yo                   ..(nil)
-        {0x1fa90, 0x1fabd},  // Ringed Planet           ..(nil)
-        {0x1fabf, 0x1fac5},  // (nil)                   ..Person With Crown
-        {0x1face, 0x1fadb},  // (nil)                   ..(nil)
-        {0x1fae0, 0x1fae8},  // Melting Face            ..(nil)
-        {0x1faf0, 0x1faf8},  // Hand With Index Finger A..(nil)
-        {0x20000, 0x2fffd},  // Cjk Unified Ideograph-20..(nil)
-        {0x30000, 0x3fffd},  // Cjk Unified Ideograph-30..(nil)
+    /** Non-printable {first, last} ranges (Konsole width -1, surfaced as 0). */
+    private static final int[] NONPRINTABLE = {
+    0xD800, 0xDFFF,
     };
 
+    /** Width-2 (wide) {first, last} ranges. */
+    private static final int[] WIDE = {
+    0x1100, 0x115F, 0x231A, 0x231B, 0x2329, 0x232A, 0x23E9, 0x23EC,
+    0x23F0, 0x23F0, 0x23F3, 0x23F3, 0x25FD, 0x25FE, 0x2614, 0x2615,
+    0x2648, 0x2653, 0x267F, 0x267F, 0x2693, 0x2693, 0x26A1, 0x26A1,
+    0x26AA, 0x26AB, 0x26BD, 0x26BE, 0x26C4, 0x26C5, 0x26CE, 0x26CE,
+    0x26D4, 0x26D4, 0x26EA, 0x26EA, 0x26F2, 0x26F3, 0x26F5, 0x26F5,
+    0x26FA, 0x26FA, 0x26FD, 0x26FD, 0x2705, 0x2705, 0x270A, 0x270B,
+    0x2728, 0x2728, 0x274C, 0x274C, 0x274E, 0x274E, 0x2753, 0x2755,
+    0x2757, 0x2757, 0x2795, 0x2797, 0x27B0, 0x27B0, 0x27BF, 0x27BF,
+    0x2B1B, 0x2B1C, 0x2B50, 0x2B50, 0x2B55, 0x2B55, 0x2E80, 0x2E99,
+    0x2E9B, 0x2EF3, 0x2F00, 0x2FD5, 0x2FF0, 0x2FFB, 0x3000, 0x3029,
+    0x302E, 0x303E, 0x3041, 0x3096, 0x309B, 0x30FF, 0x3105, 0x312F,
+    0x3131, 0x318E, 0x3190, 0x31E3, 0x31F0, 0x321E, 0x3220, 0x3247,
+    0x3250, 0xA48C, 0xA490, 0xA4C6, 0xA960, 0xA97C, 0xAC00, 0xD7A3,
+    0xF900, 0xFAFF, 0xFE10, 0xFE19, 0xFE30, 0xFE52, 0xFE54, 0xFE66,
+    0xFE68, 0xFE6B, 0xFF01, 0xFF60, 0xFFE0, 0xFFE6, 0x16FE0, 0x16FE3,
+    0x16FF0, 0x16FF1, 0x17000, 0x187F7, 0x18800, 0x18CD5, 0x18D00, 0x18D08,
+    0x1AFF0, 0x1AFF3, 0x1AFF5, 0x1AFFB, 0x1AFFD, 0x1AFFE, 0x1B000, 0x1B122,
+    0x1B132, 0x1B132, 0x1B150, 0x1B152, 0x1B155, 0x1B155, 0x1B164, 0x1B167,
+    0x1B170, 0x1B2FB, 0x1F004, 0x1F004, 0x1F0CF, 0x1F0CF, 0x1F18E, 0x1F18E,
+    0x1F191, 0x1F19A, 0x1F1E6, 0x1F202, 0x1F210, 0x1F23B, 0x1F240, 0x1F248,
+    0x1F250, 0x1F251, 0x1F260, 0x1F265, 0x1F300, 0x1F320, 0x1F32D, 0x1F335,
+    0x1F337, 0x1F37C, 0x1F37E, 0x1F393, 0x1F3A0, 0x1F3CA, 0x1F3CF, 0x1F3D3,
+    0x1F3E0, 0x1F3F0, 0x1F3F4, 0x1F3F4, 0x1F3F8, 0x1F43E, 0x1F440, 0x1F440,
+    0x1F442, 0x1F4FC, 0x1F4FF, 0x1F53D, 0x1F54B, 0x1F54E, 0x1F550, 0x1F567,
+    0x1F57A, 0x1F57A, 0x1F595, 0x1F596, 0x1F5A4, 0x1F5A4, 0x1F5FB, 0x1F64F,
+    0x1F680, 0x1F6C5, 0x1F6CC, 0x1F6CC, 0x1F6D0, 0x1F6D2, 0x1F6D5, 0x1F6D7,
+    0x1F6DC, 0x1F6DF, 0x1F6EB, 0x1F6EC, 0x1F6F4, 0x1F6FC, 0x1F7E0, 0x1F7EB,
+    0x1F7F0, 0x1F7F0, 0x1F90C, 0x1F93A, 0x1F93C, 0x1F945, 0x1F947, 0x1F9FF,
+    0x1FA70, 0x1FA7C, 0x1FA80, 0x1FA88, 0x1FA90, 0x1FABD, 0x1FABF, 0x1FAC5,
+    0x1FACE, 0x1FADB, 0x1FAE0, 0x1FAE8, 0x1FAF0, 0x1FAF8, 0x20000, 0x2FFFD,
+    0x30000, 0x3FFFD,
+    };
 
-    private static boolean intable(int[][] table, int c) {
-        // First quick check f|| Latin1 etc. characters.
-        if (c < table[0][0]) return false;
+    /** Width-0 (combining / zero-width) {first, last} ranges. */
+    private static final int[] ZERO = {
+    0x300, 0x36F, 0x483, 0x489, 0x591, 0x5BD, 0x5BF, 0x5BF,
+    0x5C1, 0x5C2, 0x5C4, 0x5C5, 0x5C7, 0x5C7, 0x600, 0x605,
+    0x610, 0x61A, 0x61C, 0x61C, 0x64B, 0x65F, 0x670, 0x670,
+    0x6D6, 0x6DD, 0x6DF, 0x6E4, 0x6E7, 0x6E8, 0x6EA, 0x6ED,
+    0x70F, 0x70F, 0x711, 0x711, 0x730, 0x74A, 0x7A6, 0x7B0,
+    0x7EB, 0x7F3, 0x7FD, 0x7FD, 0x816, 0x819, 0x81B, 0x823,
+    0x825, 0x827, 0x829, 0x82D, 0x859, 0x85B, 0x890, 0x891,
+    0x898, 0x89F, 0x8CA, 0x902, 0x93A, 0x93A, 0x93C, 0x93C,
+    0x941, 0x948, 0x94D, 0x94D, 0x951, 0x957, 0x962, 0x963,
+    0x981, 0x981, 0x9BC, 0x9BC, 0x9C1, 0x9C4, 0x9CD, 0x9CD,
+    0x9E2, 0x9E3, 0x9FE, 0x9FE, 0xA01, 0xA02, 0xA3C, 0xA3C,
+    0xA41, 0xA42, 0xA47, 0xA48, 0xA4B, 0xA4D, 0xA51, 0xA51,
+    0xA70, 0xA71, 0xA75, 0xA75, 0xA81, 0xA82, 0xABC, 0xABC,
+    0xAC1, 0xAC5, 0xAC7, 0xAC8, 0xACD, 0xACD, 0xAE2, 0xAE3,
+    0xAFA, 0xAFF, 0xB01, 0xB01, 0xB3C, 0xB3C, 0xB3F, 0xB3F,
+    0xB41, 0xB44, 0xB4D, 0xB4D, 0xB55, 0xB56, 0xB62, 0xB63,
+    0xB82, 0xB82, 0xBC0, 0xBC0, 0xBCD, 0xBCD, 0xC00, 0xC00,
+    0xC04, 0xC04, 0xC3C, 0xC3C, 0xC3E, 0xC40, 0xC46, 0xC48,
+    0xC4A, 0xC4D, 0xC55, 0xC56, 0xC62, 0xC63, 0xC81, 0xC81,
+    0xCBC, 0xCBC, 0xCBF, 0xCBF, 0xCC6, 0xCC6, 0xCCC, 0xCCD,
+    0xCE2, 0xCE3, 0xD00, 0xD01, 0xD3B, 0xD3C, 0xD41, 0xD44,
+    0xD4D, 0xD4D, 0xD62, 0xD63, 0xD81, 0xD81, 0xDCA, 0xDCA,
+    0xDD2, 0xDD4, 0xDD6, 0xDD6, 0xE31, 0xE31, 0xE34, 0xE3A,
+    0xE47, 0xE4E, 0xEB1, 0xEB1, 0xEB4, 0xEBC, 0xEC8, 0xECE,
+    0xF18, 0xF19, 0xF35, 0xF35, 0xF37, 0xF37, 0xF39, 0xF39,
+    0xF71, 0xF7E, 0xF80, 0xF84, 0xF86, 0xF87, 0xF8D, 0xF97,
+    0xF99, 0xFBC, 0xFC6, 0xFC6, 0x102D, 0x1030, 0x1032, 0x1037,
+    0x1039, 0x103A, 0x103D, 0x103E, 0x1058, 0x1059, 0x105E, 0x1060,
+    0x1071, 0x1074, 0x1082, 0x1082, 0x1085, 0x1086, 0x108D, 0x108D,
+    0x109D, 0x109D, 0x1160, 0x11FF, 0x135D, 0x135F, 0x1712, 0x1714,
+    0x1732, 0x1733, 0x1752, 0x1753, 0x1772, 0x1773, 0x17B4, 0x17B5,
+    0x17B7, 0x17BD, 0x17C6, 0x17C6, 0x17C9, 0x17D3, 0x17DD, 0x17DD,
+    0x180B, 0x180F, 0x1885, 0x1886, 0x18A9, 0x18A9, 0x1920, 0x1922,
+    0x1927, 0x1928, 0x1932, 0x1932, 0x1939, 0x193B, 0x1A17, 0x1A18,
+    0x1A1B, 0x1A1B, 0x1A56, 0x1A56, 0x1A58, 0x1A5E, 0x1A60, 0x1A60,
+    0x1A62, 0x1A62, 0x1A65, 0x1A6C, 0x1A73, 0x1A7C, 0x1A7F, 0x1A7F,
+    0x1AB0, 0x1ACE, 0x1B00, 0x1B03, 0x1B34, 0x1B34, 0x1B36, 0x1B3A,
+    0x1B3C, 0x1B3C, 0x1B42, 0x1B42, 0x1B6B, 0x1B73, 0x1B80, 0x1B81,
+    0x1BA2, 0x1BA5, 0x1BA8, 0x1BA9, 0x1BAB, 0x1BAD, 0x1BE6, 0x1BE6,
+    0x1BE8, 0x1BE9, 0x1BED, 0x1BED, 0x1BEF, 0x1BF1, 0x1C2C, 0x1C33,
+    0x1C36, 0x1C37, 0x1CD0, 0x1CD2, 0x1CD4, 0x1CE0, 0x1CE2, 0x1CE8,
+    0x1CED, 0x1CED, 0x1CF4, 0x1CF4, 0x1CF8, 0x1CF9, 0x1DC0, 0x1DFF,
+    0x200B, 0x200F, 0x202A, 0x202E, 0x2060, 0x2064, 0x2066, 0x206F,
+    0x20D0, 0x20F0, 0x2CEF, 0x2CF1, 0x2D7F, 0x2D7F, 0x2DE0, 0x2DFF,
+    0x302A, 0x302D, 0x3099, 0x309A, 0xA66F, 0xA672, 0xA674, 0xA67D,
+    0xA69E, 0xA69F, 0xA6F0, 0xA6F1, 0xA802, 0xA802, 0xA806, 0xA806,
+    0xA80B, 0xA80B, 0xA825, 0xA826, 0xA82C, 0xA82C, 0xA8C4, 0xA8C5,
+    0xA8E0, 0xA8F1, 0xA8FF, 0xA8FF, 0xA926, 0xA92D, 0xA947, 0xA951,
+    0xA980, 0xA982, 0xA9B3, 0xA9B3, 0xA9B6, 0xA9B9, 0xA9BC, 0xA9BD,
+    0xA9E5, 0xA9E5, 0xAA29, 0xAA2E, 0xAA31, 0xAA32, 0xAA35, 0xAA36,
+    0xAA43, 0xAA43, 0xAA4C, 0xAA4C, 0xAA7C, 0xAA7C, 0xAAB0, 0xAAB0,
+    0xAAB2, 0xAAB4, 0xAAB7, 0xAAB8, 0xAABE, 0xAABF, 0xAAC1, 0xAAC1,
+    0xAAEC, 0xAAED, 0xAAF6, 0xAAF6, 0xABE5, 0xABE5, 0xABE8, 0xABE8,
+    0xABED, 0xABED, 0xD7B0, 0xD7C6, 0xD7CB, 0xD7FB, 0xFB1E, 0xFB1E,
+    0xFE00, 0xFE0F, 0xFE20, 0xFE2F, 0xFEFF, 0xFEFF, 0xFFF9, 0xFFFB,
+    0x101FD, 0x101FD, 0x102E0, 0x102E0, 0x10376, 0x1037A, 0x10A01, 0x10A03,
+    0x10A05, 0x10A06, 0x10A0C, 0x10A0F, 0x10A38, 0x10A3A, 0x10A3F, 0x10A3F,
+    0x10AE5, 0x10AE6, 0x10D24, 0x10D27, 0x10EAB, 0x10EAC, 0x10EFD, 0x10EFF,
+    0x10F46, 0x10F50, 0x10F82, 0x10F85, 0x11001, 0x11001, 0x11038, 0x11046,
+    0x11070, 0x11070, 0x11073, 0x11074, 0x1107F, 0x11081, 0x110B3, 0x110B6,
+    0x110B9, 0x110BA, 0x110BD, 0x110BD, 0x110C2, 0x110C2, 0x110CD, 0x110CD,
+    0x11100, 0x11102, 0x11127, 0x1112B, 0x1112D, 0x11134, 0x11173, 0x11173,
+    0x11180, 0x11181, 0x111B6, 0x111BE, 0x111C9, 0x111CC, 0x111CF, 0x111CF,
+    0x1122F, 0x11231, 0x11234, 0x11234, 0x11236, 0x11237, 0x1123E, 0x1123E,
+    0x11241, 0x11241, 0x112DF, 0x112DF, 0x112E3, 0x112EA, 0x11300, 0x11301,
+    0x1133B, 0x1133C, 0x11340, 0x11340, 0x11366, 0x1136C, 0x11370, 0x11374,
+    0x11438, 0x1143F, 0x11442, 0x11444, 0x11446, 0x11446, 0x1145E, 0x1145E,
+    0x114B3, 0x114B8, 0x114BA, 0x114BA, 0x114BF, 0x114C0, 0x114C2, 0x114C3,
+    0x115B2, 0x115B5, 0x115BC, 0x115BD, 0x115BF, 0x115C0, 0x115DC, 0x115DD,
+    0x11633, 0x1163A, 0x1163D, 0x1163D, 0x1163F, 0x11640, 0x116AB, 0x116AB,
+    0x116AD, 0x116AD, 0x116B0, 0x116B5, 0x116B7, 0x116B7, 0x1171D, 0x1171F,
+    0x11722, 0x11725, 0x11727, 0x1172B, 0x1182F, 0x11837, 0x11839, 0x1183A,
+    0x1193B, 0x1193C, 0x1193E, 0x1193E, 0x11943, 0x11943, 0x119D4, 0x119D7,
+    0x119DA, 0x119DB, 0x119E0, 0x119E0, 0x11A01, 0x11A0A, 0x11A33, 0x11A38,
+    0x11A3B, 0x11A3E, 0x11A47, 0x11A47, 0x11A51, 0x11A56, 0x11A59, 0x11A5B,
+    0x11A8A, 0x11A96, 0x11A98, 0x11A99, 0x11C30, 0x11C36, 0x11C38, 0x11C3D,
+    0x11C3F, 0x11C3F, 0x11C92, 0x11CA7, 0x11CAA, 0x11CB0, 0x11CB2, 0x11CB3,
+    0x11CB5, 0x11CB6, 0x11D31, 0x11D36, 0x11D3A, 0x11D3A, 0x11D3C, 0x11D3D,
+    0x11D3F, 0x11D45, 0x11D47, 0x11D47, 0x11D90, 0x11D91, 0x11D95, 0x11D95,
+    0x11D97, 0x11D97, 0x11EF3, 0x11EF4, 0x11F00, 0x11F01, 0x11F36, 0x11F3A,
+    0x11F40, 0x11F40, 0x11F42, 0x11F42, 0x13430, 0x13440, 0x13447, 0x13455,
+    0x16AF0, 0x16AF4, 0x16B30, 0x16B36, 0x16F4F, 0x16F4F, 0x16F8F, 0x16F92,
+    0x16FE4, 0x16FE4, 0x1BC9D, 0x1BC9E, 0x1BCA0, 0x1BCA3, 0x1CF00, 0x1CF2D,
+    0x1CF30, 0x1CF46, 0x1D167, 0x1D169, 0x1D173, 0x1D182, 0x1D185, 0x1D18B,
+    0x1D1AA, 0x1D1AD, 0x1D242, 0x1D244, 0x1DA00, 0x1DA36, 0x1DA3B, 0x1DA6C,
+    0x1DA75, 0x1DA75, 0x1DA84, 0x1DA84, 0x1DA9B, 0x1DA9F, 0x1DAA1, 0x1DAAF,
+    0x1E000, 0x1E006, 0x1E008, 0x1E018, 0x1E01B, 0x1E021, 0x1E023, 0x1E024,
+    0x1E026, 0x1E02A, 0x1E08F, 0x1E08F, 0x1E130, 0x1E136, 0x1E2AE, 0x1E2AE,
+    0x1E2EC, 0x1E2EF, 0x1E4EC, 0x1E4EF, 0x1E8D0, 0x1E8D6, 0x1E944, 0x1E94A,
+    0xE0001, 0xE0001, 0xE0020, 0xE007F, 0xE0100, 0xE01EF,
+    };
 
-        // Binary search in table.
-        int bot = 0;
-        int top = table.length - 1; // (int)(size / sizeof(struct interval) - 1);
-        while (top >= bot) {
-            int mid = (bot + top) / 2;
-            if (table[mid][1] < c) {
-                bot = mid + 1;
-            } else if (table[mid][0] > c) {
-                top = mid - 1;
-            } else {
-                return true;
-            }
+    /** Binary-search a flat array of sorted, non-overlapping {first, last} pairs. */
+    private static boolean inRanges(int[] r, int c) {
+        int lo = 0, hi = (r.length >> 1) - 1;
+        while (lo <= hi) {
+            int m = (lo + hi) >>> 1;
+            int first = r[m << 1], last = r[(m << 1) + 1];
+            if (last < c) lo = m + 1;
+            else if (first > c) hi = m - 1;
+            else return true;
         }
         return false;
     }
 
-    /** Return the terminal display width of a code point: 0, 1 || 2. */
+    /** Display width (0, 1 or 2) of a Unicode code point. */
     public static int width(int ucs) {
-        if (ucs == 0 ||
-            ucs == 0x034F ||
-            (0x200B <= ucs && ucs <= 0x200F) ||
-            ucs == 0x2028 ||
-            ucs == 0x2029 ||
-            (0x202A <= ucs && ucs <= 0x202E) ||
-            (0x2060 <= ucs && ucs <= 0x2063)) {
-            return 0;
+        if (ucs >= 0 && ucs < DIRECT_LUT.length) {
+            int w = DIRECT_LUT[ucs];
+            return w < 0 ? 0 : w;
         }
-
-        // C0/C1 control characters
-        // Termux change: Return 0 instead of -1.
-        if (ucs < 32 || (0x07F <= ucs && ucs < 0x0A0)) return 0;
-
-        // combining characters with zero width
-        if (intable(ZERO_WIDTH, ucs)) return 0;
-
-        // Emoji (Emoji_Presentation) are wide. The static WIDE_EASTASIAN table predates the newer
-        // emoji blocks (e.g. U+1FAC0 🫀, U+1F6B5 🚵), so without this they'd be treated as width 1
-        // and the cursor would land on the emoji's second half. Covers the main supplementary
-        // emoji ranges only (not BMP dingbats/symbols, many of which TUIs use as width 1).
-        if ((ucs >= 0x1F300 && ucs <= 0x1F64F)   // Misc Symbols & Pictographs + Emoticons
-            || (ucs >= 0x1F680 && ucs <= 0x1F6FF) // Transport & Map Symbols
-            || (ucs >= 0x1F900 && ucs <= 0x1F9FF) // Supplemental Symbols & Pictographs
-            || (ucs >= 0x1FA00 && ucs <= 0x1FAFF)) { // Symbols & Pictographs Extended-A
-            return 2;
-        }
-
-        // BMP Emoji_Presentation=Yes code points. Unicode's `string-width` (used by Claude Code /
-        // Ink and most modern TUIs) treats these as width 2, but they live below the supplementary
-        // emoji blocks above and are NOT all in WIDE_EASTASIAN. Without this, e.g. ✅ U+2705 and
-        // ⏳ U+23F3 measure as width 1 here while the app assumes width 2, so manually-wrapped
-        // output diverges by a column per glyph and the cursor drifts. This is the exact list from
-        // the Emoji_Presentation property — TUI symbols like ✓ U+2713, ★ U+2605, the arrows
-        // (U+2190..U+21FF) and the media triangles (U+23F4..U+23FA) are intentionally excluded.
-        if (isBmpEmojiPresentation(ucs)) return 2;
-
-        return intable(WIDE_EASTASIAN, ucs) ? 2 : 1;
-    }
-
-    /** True for the BMP code points whose Unicode Emoji_Presentation property is Yes. */
-    private static boolean isBmpEmojiPresentation(int c) {
-        return (c >= 0x231A && c <= 0x231B)   // ⌚⌛
-            || (c >= 0x23E9 && c <= 0x23EC)   // ⏩⏪⏫⏬
-            || c == 0x23F0 || c == 0x23F3     // ⏰ ⏳
-            || (c >= 0x25FD && c <= 0x25FE)   // ◽◾
-            || (c >= 0x2614 && c <= 0x2615)   // ☔☕
-            || (c >= 0x2648 && c <= 0x2653)   // zodiac ♈..♓
-            || c == 0x267F                    // ♿
-            || c == 0x2693                    // ⚓
-            || c == 0x26A1                    // ⚡
-            || (c >= 0x26AA && c <= 0x26AB)   // ⚪⚫
-            || (c >= 0x26BD && c <= 0x26BE)   // ⚽⚾
-            || (c >= 0x26C4 && c <= 0x26C5)   // ⛄⛅
-            || c == 0x26CE                    // ⛎
-            || c == 0x26D4                    // ⛔
-            || c == 0x26EA                    // ⛪
-            || (c >= 0x26F2 && c <= 0x26F3)   // ⛲⛳
-            || c == 0x26F5                    // ⛵
-            || c == 0x26FA                    // ⛺
-            || c == 0x26FD                    // ⛽
-            || c == 0x2705                    // ✅
-            || (c >= 0x270A && c <= 0x270B)   // ✊✋
-            || c == 0x2728                    // ✨
-            || c == 0x274C                    // ❌
-            || c == 0x274E                    // ❎
-            || (c >= 0x2753 && c <= 0x2755)   // ❓❔❕
-            || c == 0x2757                    // ❗
-            || (c >= 0x2795 && c <= 0x2797)   // ➕➖➗
-            || c == 0x27B0                    // ➰
-            || c == 0x27BF                    // ➿
-            || (c >= 0x2B1B && c <= 0x2B1C)   // ⬛⬜
-            || c == 0x2B50                    // ⭐
-            || c == 0x2B55;                   // ⭕
+        if (inRanges(NONPRINTABLE, ucs)) return 0;
+        if (inRanges(WIDE, ucs)) return 2;
+        if (inRanges(ZERO, ucs)) return 0;
+        return 1;
     }
 
     /** The width at an index position in a java char array. */
@@ -618,5 +230,4 @@ public final class WcWidth {
         }
         return count;
     }
-
 }
