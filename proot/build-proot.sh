@@ -307,6 +307,28 @@ sed -i.bak '/^OBJECTS += \\$/i OBJECTS += extension/python/python_stub.o' "${PRO
 # rodata-szegmenst gyárt, egyszerűen kivesszük a flaget — funkcionálisan azonos.
 sed -i.bak 's/,--rosegment//g' "${PROOT_MAKEFILE}"
 
+# ─── fake_id0 ownership fix (suid → euid) ─────────────────────────────────
+# A -0 fake-root módban a `stat` egy app-tulajdonú fájl tulajdonosát az
+# EMULÁLT MENTETT uid-dal (config->suid) írja felül. A programok viszont a
+# `st_uid == geteuid()` mintával ellenőrzik a tulajdont, azaz az EFFEKTÍV
+# uid (config->euid) ellen. Amikor egy privilege-drop euid != suid állapotot
+# hagy — pl. `su`/`runuser`/`pg_createcluster`, ami seteuid-del vált a cél-
+# userre, de a mentett uid 0 marad —, a check elhasal:
+#   FATAL: data directory "..." has wrong ownership   (PostgreSQL)
+# A `setpriv` azért működik, mert teljesen dropol (ruid=euid=suid). Mivel a
+# FATAL eleve csak akkor jön, ha st_uid != geteuid(), és st_uid == suid, ez
+# bizonyítja hogy suid != euid — így az effektív uid/gid jelentése a stat-ban
+# (mind a hagyományos stat, mind a modern statx ágon, amit a glibc ma használ)
+# konstrukció szerint helyreállítja az egyezést.
+FAKEID_STAT=$(find "${PROOT_SRC}" -path '*/fake_id0/stat.c' -type f 2>/dev/null | head -n1)
+if [[ -n "${FAKEID_STAT}" ]]; then
+  echo "[build-proot] patch fake_id0 stat ownership (suid->euid): ${FAKEID_STAT}"
+  sed -i.bak -e 's/config->suid/config->euid/g' -e 's/config->sgid/config->egid/g' "${FAKEID_STAT}"
+  grep -q 'config->euid' "${FAKEID_STAT}" || { echo "[build-proot] HIBA: fake_id0 stat patch nem alkalmazódott" >&2; exit 8; }
+else
+  echo "[build-proot] WARN: fake_id0/stat.c nem található — ownership-patch kihagyva" >&2
+fi
+
 echo "[build-proot] make -C ${PROOT_SRC} (NDK cross-compile)"
 # A Termux fork néhány extension-ja (ashmem_memfd, fake_id0) missing-include-okat
 # tartalmaz amik NDK clang 18+ strict-mode-on (-Werror=implicit-function-declaration)
