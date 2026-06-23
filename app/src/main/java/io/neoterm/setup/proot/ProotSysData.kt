@@ -162,7 +162,8 @@ unevictable_pgs_stranded 0
   /**
    * Biztosítja a fake fájlokat, és visszaadja a szükséges proot bind-párokat
    * (fakePath → realProcPath) azokra a `/proc` célokra, amik az adott eszközön
-   * olvashatatlanok (a `/proc/stat`-nál akkor is, ha hiányzik a `btime`).
+   * olvashatatlanok. A valódi, olvasható `/proc` célokat (pl. élő `/proc/stat`)
+   * érintetlenül hagyjuk, hogy a valós CPU-adat átjöjjön.
    */
   fun bindings(): List<Pair<String, String>> {
     val dir = File("${NeoTermPath.PROOT_ROOT_PATH}/sysdata")
@@ -222,18 +223,19 @@ unevictable_pgs_stranded 0
     return STAT.replace(Regex("(?m)^btime .*$"), "btime $btime")
   }
 
-  /** A valós /proc cél olvashatatlan/hiányos → fake kell. */
+  /**
+   * Csak akkor fake-elünk, ha a valódi /proc cél **olvashatatlan vagy üres**.
+   *
+   * A /proc/stat-ot szándékosan NEM cseréljük le pusztán a hiányzó `btime` sor
+   * miatt: a statikus fake elölné az élő CPU-jiffie-ket, amitől a htop/top
+   * CPU%-a (per-mag és per-process) `N/A`-ra esik. Ha a valódi /proc/stat
+   * olvasható, hagyjuk átjönni az élő tartalmat (valós CPU%); a btime esetleges
+   * hiánya csak egy kozmetikai `ps` „Unable to get system boot time" üzenet.
+   * Ha viszont a kernel (SELinux) tiltja az olvasást, a fake lép életbe.
+   */
   private fun needsFake(realPath: String): Boolean {
     return try {
-      val content = File(realPath).readText()
-      if (content.isEmpty()) {
-        true
-      } else if (realPath == "/proc/stat") {
-        // ps "Unable to get system boot time" → hiányzik a btime sor.
-        !content.contains("btime")
-      } else {
-        false
-      }
+      File(realPath).readText().isEmpty()
     } catch (e: Exception) {
       true
     }
