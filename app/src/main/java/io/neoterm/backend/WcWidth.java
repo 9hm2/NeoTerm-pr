@@ -540,7 +540,52 @@ public final class WcWidth {
             return 2;
         }
 
+        // BMP Emoji_Presentation=Yes code points. Unicode's `string-width` (used by Claude Code /
+        // Ink and most modern TUIs) treats these as width 2, but they live below the supplementary
+        // emoji blocks above and are NOT all in WIDE_EASTASIAN. Without this, e.g. ✅ U+2705 and
+        // ⏳ U+23F3 measure as width 1 here while the app assumes width 2, so manually-wrapped
+        // output diverges by a column per glyph and the cursor drifts. This is the exact list from
+        // the Emoji_Presentation property — TUI symbols like ✓ U+2713, ★ U+2605, the arrows
+        // (U+2190..U+21FF) and the media triangles (U+23F4..U+23FA) are intentionally excluded.
+        if (isBmpEmojiPresentation(ucs)) return 2;
+
         return intable(WIDE_EASTASIAN, ucs) ? 2 : 1;
+    }
+
+    /** True for the BMP code points whose Unicode Emoji_Presentation property is Yes. */
+    private static boolean isBmpEmojiPresentation(int c) {
+        return (c >= 0x231A && c <= 0x231B)   // ⌚⌛
+            || (c >= 0x23E9 && c <= 0x23EC)   // ⏩⏪⏫⏬
+            || c == 0x23F0 || c == 0x23F3     // ⏰ ⏳
+            || (c >= 0x25FD && c <= 0x25FE)   // ◽◾
+            || (c >= 0x2614 && c <= 0x2615)   // ☔☕
+            || (c >= 0x2648 && c <= 0x2653)   // zodiac ♈..♓
+            || c == 0x267F                    // ♿
+            || c == 0x2693                    // ⚓
+            || c == 0x26A1                    // ⚡
+            || (c >= 0x26AA && c <= 0x26AB)   // ⚪⚫
+            || (c >= 0x26BD && c <= 0x26BE)   // ⚽⚾
+            || (c >= 0x26C4 && c <= 0x26C5)   // ⛄⛅
+            || c == 0x26CE                    // ⛎
+            || c == 0x26D4                    // ⛔
+            || c == 0x26EA                    // ⛪
+            || (c >= 0x26F2 && c <= 0x26F3)   // ⛲⛳
+            || c == 0x26F5                    // ⛵
+            || c == 0x26FA                    // ⛺
+            || c == 0x26FD                    // ⛽
+            || c == 0x2705                    // ✅
+            || (c >= 0x270A && c <= 0x270B)   // ✊✋
+            || c == 0x2728                    // ✨
+            || c == 0x274C                    // ❌
+            || c == 0x274E                    // ❎
+            || (c >= 0x2753 && c <= 0x2755)   // ❓❔❕
+            || c == 0x2757                    // ❗
+            || (c >= 0x2795 && c <= 0x2797)   // ➕➖➗
+            || c == 0x27B0                    // ➰
+            || c == 0x27BF                    // ➿
+            || (c >= 0x2B1B && c <= 0x2B1C)   // ⬛⬜
+            || c == 0x2B50                    // ⭐
+            || c == 0x2B55;                   // ⭕
     }
 
     /** The width at an index position in a java char array. */
