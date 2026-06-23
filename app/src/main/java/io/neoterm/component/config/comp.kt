@@ -333,6 +333,16 @@ object NeoPreference {
     )
   }
 
+  /** When on, known USB-serial chips (FTDI/CP210x/CH34x/PL2303/CDC-ACM) are
+   *  driven app-side by usb-serial-for-android and exposed to the distro as
+   *  /dev/ttyUSB*. Runtime toggle — takes effect on the next device attach. */
+  fun isUsbSerialEnabled(): Boolean {
+    return loadBoolean(
+      R.string.key_general_usb_serial,
+      DefaultValues.enableUsbSerial
+    )
+  }
+
   /** The user's default cursor shape: 0 = block, 1 = underline, 2 = bar (TerminalEmulator
    *  CURSOR_STYLE_*). Apps can still override it at runtime via DECSCUSR. */
   fun getCursorStyle(): Int {

@@ -223,3 +223,89 @@ Java_io_neoterm_backend_JNI_close(JNIEnv *TERMUX_UNUSED(env), jclass TERMUX_UNUS
                                    jint fileDescriptor) {
     close(fileDescriptor);
 }
+
+/* ── USB-serial PTY bridge ───────────────────────────────────────────────────
+ * openPty(): allocate a PTY master/slave pair WITHOUT forking a child (unlike
+ * createSubprocess). NeoTerm keeps the master and pumps it to a usb-serial-for-
+ * android port; proot binds the slave path onto /dev/ttyUSB*. Returns the slave
+ * path, and writes the master fd into outMasterFd[0]. Returns null on failure. */
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_neoterm_backend_JNI_openPty(JNIEnv *env, jclass TERMUX_UNUSED(clazz),
+                                    jintArray outMasterFd) {
+    int ptm = open("/dev/ptmx", O_RDWR | O_CLOEXEC);
+    if (ptm < 0) return nullptr;
+    char devname[64];
+    if (grantpt(ptm) || unlockpt(ptm) ||
+#ifdef LACKS_PTSNAME_R
+        strncpy(devname, ptsname(ptm) ? ptsname(ptm) : "", sizeof(devname)) == nullptr
+#else
+        ptsname_r(ptm, devname, sizeof(devname))
+#endif
+            ) {
+        close(ptm);
+        return nullptr;
+    }
+    /* Raw, transparent line discipline so serial bytes pass through unmodified. */
+    struct termios tios;
+    tcgetattr(ptm, &tios);
+    cfmakeraw(&tios);
+    tcsetattr(ptm, TCSANOW, &tios);
+
+    jint fd = ptm;
+    env->SetIntArrayRegion(outMasterFd, 0, 1, &fd);
+    return env->NewStringUTF(devname);
+}
+
+static int baud_to_int(speed_t s) {
+    switch (s) {
+        case B50: return 50;          case B75: return 75;
+        case B110: return 110;        case B134: return 134;
+        case B150: return 150;        case B200: return 200;
+        case B300: return 300;        case B600: return 600;
+        case B1200: return 1200;      case B1800: return 1800;
+        case B2400: return 2400;      case B4800: return 4800;
+        case B9600: return 9600;      case B19200: return 19200;
+        case B38400: return 38400;    case B57600: return 57600;
+        case B115200: return 115200;  case B230400: return 230400;
+        case B460800: return 460800;  case B500000: return 500000;
+        case B576000: return 576000;  case B921600: return 921600;
+        case B1000000: return 1000000;case B1152000: return 1152000;
+        case B1500000: return 1500000;case B2000000: return 2000000;
+        case B2500000: return 2500000;case B3000000: return 3000000;
+        case B3500000: return 3500000;case B4000000: return 4000000;
+        default: return 9600;
+    }
+}
+
+/* ptySerialParams(masterFd): read the PTY's current termios (set by the guest's
+ * tcsetattr on the slave) and map it to portable serial params, so the pump can
+ * program the real chip via usb-serial-for-android.
+ * Returns int[5] = { baud, dataBits, stopBits, parity, flow }
+ *   parity: 0=none 1=odd 2=even 3=mark 4=space ;  flow: 0=none 1=rts/cts 2=xon/xoff */
+extern "C" JNIEXPORT jintArray JNICALL
+Java_io_neoterm_backend_JNI_ptySerialParams(JNIEnv *env, jclass TERMUX_UNUSED(clazz),
+                                            jint masterFd) {
+    struct termios t;
+    jint out[5] = {9600, 8, 1, 0, 0};
+    if (tcgetattr(masterFd, &t) == 0) {
+        out[0] = baud_to_int(cfgetospeed(&t));
+        switch (t.c_cflag & CSIZE) {
+            case CS5: out[1] = 5; break;  case CS6: out[1] = 6; break;
+            case CS7: out[1] = 7; break;  default:  out[1] = 8; break;
+        }
+        out[2] = (t.c_cflag & CSTOPB) ? 2 : 1;
+        if (t.c_cflag & PARENB) {
+#ifdef CMSPAR
+            if (t.c_cflag & CMSPAR) out[3] = (t.c_cflag & PARODD) ? 3 : 4; else
+#endif
+            out[3] = (t.c_cflag & PARODD) ? 1 : 2;
+        } else out[3] = 0;
+#ifdef CRTSCTS
+        if (t.c_cflag & CRTSCTS) out[4] = 1; else
+#endif
+        if (t.c_iflag & (IXON | IXOFF)) out[4] = 2; else out[4] = 0;
+    }
+    jintArray arr = env->NewIntArray(5);
+    env->SetIntArrayRegion(arr, 0, 5, out);
+    return arr;
+}

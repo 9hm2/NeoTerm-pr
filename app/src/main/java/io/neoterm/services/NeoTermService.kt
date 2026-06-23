@@ -146,6 +146,7 @@ class NeoTermService : Service() {
     io.neoterm.utils.CameraBridge.stop()
     io.neoterm.utils.GpsBridge.stop()
     io.neoterm.utils.UsbBridge.unregister(this)
+    io.neoterm.setup.usbserial.UsbSerialBridge.stopAll()
 
     for (i in mTerminalSessions.indices)
       mTerminalSessions[i].finishIfRunning()

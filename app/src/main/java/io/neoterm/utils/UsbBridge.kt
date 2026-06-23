@@ -12,7 +12,9 @@ import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.os.Build
 import android.system.Os
+import io.neoterm.component.config.NeoPreference
 import io.neoterm.setup.proot.Kmsg
+import io.neoterm.setup.usbserial.UsbSerialBridge
 import java.io.FileDescriptor
 
 /**
@@ -82,8 +84,11 @@ object UsbBridge {
   }
 
   fun requestPermission(context: Context, usb: UsbManager, device: UsbDevice) {
+    // A known USB-serial chip + the toggle on -> the app-side serial bridge owns
+    // it (pty -> /dev/ttyUSB*), not the raw fd-server (avoids a double claim).
+    val serial = NeoPreference.isUsbSerialEnabled() && UsbSerialBridge.isSerial(device)
     if (usb.hasPermission(device)) {
-      openAndStore(usb, device)
+      if (serial) UsbSerialBridge.attach(usb, device) else openAndStore(usb, device)
       return
     }
     val flags = PendingIntent.FLAG_UPDATE_CURRENT or
@@ -231,6 +236,7 @@ class UsbReceiver : BroadcastReceiver() {
       UsbManager.ACTION_USB_DEVICE_DETACHED -> {
         NLog.e("UsbBridge", "Detached ${device?.deviceName}")
         if (device != null) Kmsg.log(usbKmsgLine("USB disconnect,", device))
+        UsbSerialBridge.onDetached(device)
         UsbBridge.onDetached(device)
       }
     }

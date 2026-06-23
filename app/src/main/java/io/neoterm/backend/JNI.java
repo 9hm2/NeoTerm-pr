@@ -42,4 +42,21 @@ final class JNI {
    */
   public static native void close(int fileDescriptor);
 
+  /**
+   * Allocate a PTY master/slave pair WITHOUT forking a child (for the USB-serial
+   * bridge: NeoTerm pumps the master to a usb-serial port, proot binds the slave
+   * onto /dev/ttyUSB*). Returns the slave device path (e.g. "/dev/pts/7") and
+   * writes the master fd into outMasterFd[0]; returns null on failure.
+   */
+  static native String openPty(int[] outMasterFd);
+
+  /**
+   * Read the PTY's current termios (set by the guest via tcsetattr on the slave)
+   * and map it to portable serial parameters so the bridge can program the chip.
+   *
+   * @return int[5] = { baud, dataBits, stopBits, parity, flow };
+   *         parity 0=none 1=odd 2=even 3=mark 4=space; flow 0=none 1=rts/cts 2=xon/xoff
+   */
+  static native int[] ptySerialParams(int masterFd);
+
 }

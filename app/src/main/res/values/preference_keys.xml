@@ -11,6 +11,7 @@
   <string name="key_general_camera" translatable="false">neoterm_general_camera</string>
   <string name="key_general_camera_resolution" translatable="false">neoterm_general_camera_resolution</string>
   <string name="key_general_gps" translatable="false">neoterm_general_gps</string>
+  <string name="key_general_usb_serial" translatable="false">neoterm_general_usb_serial</string>
   <string name="key_general_cursor_style" translatable="false">neoterm_general_cursor_style</string>
   <string name="key_general_use_execve_wrapper" translatable="false">neoterm_general_use_execve_wrapper</string>
   <string name="key_general_enable_word_based_ime" translatable="false">neoterm_general_enable_word_based_ime</string>

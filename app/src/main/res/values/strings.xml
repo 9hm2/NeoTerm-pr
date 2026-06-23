@@ -148,6 +148,8 @@
   <string name="pref_general_camera_resolution_desc">Capture resolution for the camera stream. Lower means less latency and bandwidth; the closest size the camera supports is used.</string>
   <string name="pref_general_gps">GPS / Location</string>
   <string name="pref_general_gps_desc">Built-in gpsd: serves the device GPS to the Linux distro on 127.0.0.1:2947 (gpsd protocol). No gpsd needed — just run cgps / gpspipe / gpsmon.</string>
+  <string name="pref_general_usb_serial">USB serial (/dev/ttyUSB)</string>
+  <string name="pref_general_usb_serial_desc">Drive USB-serial adapters (FTDI, CP210x, CH34x, PL2303, CDC-ACM) app-side and expose them to the distro as /dev/ttyUSB*. No root. Device list comes from the Linux kernel driver IDs. Takes effect on the next plug-in.</string>
   <string-array name="pref_general_camera_resolution_entries" translatable="false">
     <item>320x240</item>
     <item>640x480</item>

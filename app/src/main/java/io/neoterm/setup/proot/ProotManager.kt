@@ -208,6 +208,13 @@ object ProotManager {
     }
     bind(args, kmsgBuf.absolutePath, "/dev/kmsg")
 
+    // USB-serial bridge: bind each active adapter's PTY slave onto /dev/ttyUSB*
+    // (the chip is driven app-side by usb-serial-for-android). Bound per launch;
+    // plug the adapter before opening the session (or open a new tab) to see it.
+    io.neoterm.setup.usbserial.UsbSerialBridge.bindings().forEach { (slave, tty) ->
+      if (File(slave).exists()) bind(args, slave, tty)
+    }
+
     // Fake /proc fájlok (proot-distro sysdata mintájára): az Android korlátozott
     // /proc-ja miatt a ps/top/uptime/free hibára futna ("Unable to get system
     // boot time"). A /proc bind UTÁN kötjük, hogy a konkrétabb bind felülírja.
