@@ -4,6 +4,8 @@ import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
+import android.net.LocalServerSocket
+import android.net.LocalSocket
 import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
@@ -47,11 +49,84 @@ object UsbSerialBridge {
     var conn: UsbDeviceConnection? = null
     val threads = ArrayList<Thread>()
     var lastParams: IntArray? = null
+    var dtr = false       // cached modem-control outputs (PTY can't carry them)
+    var rts = false
     val masterJfd get() = pfd.fileDescriptor
     val masterFd: Int get() = pfd.fd
   }
 
   private var pool: Array<Slot>? = null
+  private var controlServer: LocalServerSocket? = null
+
+  // ── modem-line control server (io.neoterm.ttyusb) ───────────────────────
+  // The proot ioctl proxy forwards the guest's TIOCMGET/TIOCMSET/TIOCMBIS/
+  // TIOCMBIC/TCSBRK on a /dev/ttyUSB* fd here (resolved to its PTY slave path),
+  // so DTR/RTS/CTS/DSR/DCD/RI/BREAK reach the real chip. Line protocol:
+  //   GET <pts>            -> "<modembits>" | "NAK"
+  //   SET|BIS|BIC <pts> <bits> -> "OK" | "NAK"
+  //   BRK <pts> <0|1|p>    -> "OK" | "NAK"
+  // modem bits = Linux TIOCM_*: DTR 0x002 RTS 0x004 CTS 0x020 CAR 0x040 RNG 0x080 DSR 0x100
+  private fun startControlServer() {
+    if (controlServer != null) return
+    val srv = try { LocalServerSocket("io.neoterm.ttyusb") } catch (e: Exception) {
+      Kmsg.log("usb-serial: modem control bind failed: ${e.message}"); return
+    }
+    controlServer = srv
+    Thread({
+      Kmsg.log("usb-serial: modem control server ready (io.neoterm.ttyusb)")
+      while (true) {
+        val c = try { srv.accept() } catch (e: Exception) { break }
+        runCatching { handleControl(c) }
+        runCatching { c.close() }
+      }
+    }, "ttyusb-control").apply { isDaemon = true; start() }
+  }
+
+  private fun handleControl(c: LocalSocket) {
+    val line = c.inputStream.bufferedReader().readLine()?.trim() ?: return
+    val out = c.outputStream
+    fun reply(s: String) { out.write((s + "\n").toByteArray()); out.flush() }
+    val parts = line.split(" ")
+    if (parts.size < 2) { reply("NAK"); return }
+    val op = parts[0]
+    val pts = parts[1]
+    val slot = synchronized(this) { pool?.firstOrNull { it.slavePath == pts && it.port != null } }
+    val port = slot?.port
+    if (slot == null || port == null) { reply("NAK"); return }
+    val bits = parts.getOrNull(2)?.toIntOrNull() ?: 0
+    when (op) {
+      "GET" -> {
+        var m = 0
+        if (slot.dtr) m = m or 0x002
+        if (slot.rts) m = m or 0x004
+        runCatching { if (port.getCTS()) m = m or 0x020 }
+        runCatching { if (port.getCD()) m = m or 0x040 }
+        runCatching { if (port.getRI()) m = m or 0x080 }
+        runCatching { if (port.getDSR()) m = m or 0x100 }
+        reply(m.toString())
+      }
+      "SET" -> { setLines(slot, (bits and 0x002) != 0, (bits and 0x004) != 0); reply("OK") }
+      "BIS" -> { setLines(slot, slot.dtr || (bits and 0x002) != 0, slot.rts || (bits and 0x004) != 0); reply("OK") }
+      "BIC" -> { setLines(slot, slot.dtr && (bits and 0x002) == 0, slot.rts && (bits and 0x004) == 0); reply("OK") }
+      "BRK" -> {
+        val v = parts.getOrNull(2) ?: "0"
+        runCatching {
+          if (v == "p") { port.setBreak(true); Thread.sleep(250); port.setBreak(false) }
+          else port.setBreak(v == "1")
+        }
+        Kmsg.log("usb-serial: ${slot.ttyName} BREAK ${if (v == "1") "on" else if (v == "p") "pulse" else "off"}")
+        reply("OK")
+      }
+      else -> reply("NAK")
+    }
+  }
+
+  private fun setLines(slot: Slot, dtr: Boolean, rts: Boolean) {
+    val port = slot.port ?: return
+    if (dtr != slot.dtr) { runCatching { port.setDTR(dtr) }; slot.dtr = dtr }
+    if (rts != slot.rts) { runCatching { port.setRTS(rts) }; slot.rts = rts }
+    Kmsg.log("usb-serial: ${slot.ttyName} DTR=${if (slot.dtr) 1 else 0} RTS=${if (slot.rts) 1 else 0}")
+  }
 
   // ── pool lifecycle ──────────────────────────────────────────────────────
   @Synchronized
@@ -70,6 +145,7 @@ object UsbSerialBridge {
     }
     val arr = slots.toTypedArray()
     pool = arr
+    startControlServer()
     Kmsg.log("usb-serial: ready — pool of ${arr.size} ports /dev/ttyUSB0..${arr.size - 1} (hotplug)")
     return arr
   }
@@ -156,6 +232,8 @@ object UsbSerialBridge {
       runCatching { slot.pfd.close() }
     }
     pool = null
+    runCatching { controlServer?.close() }
+    controlServer = null
   }
 
   /** Stop pumping + close the chip, but keep the pool PTY bound for the next plug. */

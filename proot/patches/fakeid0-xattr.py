@@ -303,4 +303,111 @@ statx_new = r'''int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config
 s2 = re.sub(r'int fake_id0_handle_statx_syscall\(.*?\n\}\n', lambda _m: statx_new, s, count=1, flags=re.S)
 must(s2!=s, "replace statx handler"); s=s2
 wr(sp, s)
+
+# ---- syscall/enter.c: proxy the PTY modem-control / break ioctls
+#      (TIOCMGET/TIOCMSET/TIOCMBIS/TIOCMBIC, TCSBRK, TIOCSBRK/TIOCCBRK) on a bound
+#      /dev/ttyUSB* (a PTY slave) to the app-side usb-serial bridge over the
+#      io.neoterm.ttyusb abstract socket, so DTR/RTS/CTS/DSR/DCD/RI and BREAK
+#      reach the real chip. The data path stays native; this mirrors the existing
+#      in-tracer SIOCGIFINDEX fake. Non-serial PTYs (the shell) get a NAK and the
+#      real ioctl runs. ----
+EN = ROOT + "/syscall/enter.c"; s = rd(EN)
+if 'uknl_modem_call' not in s:
+    must('#include <sys/ioctl.h>' in s, "enter.c sys/ioctl include")
+    s = s.replace('#include <sys/ioctl.h>   /* ioctl(2): SIOCGIFMTU / SIOCGIFHWADDR */',
+                  '#include <sys/ioctl.h>   /* ioctl(2): SIOCGIFMTU / SIOCGIFHWADDR */\n'
+                  '#include <stdlib.h>      /* atoi(3) — NeoTerm usb-serial modem proxy */', 1)
+    func = (
+        '/* NeoTerm: one request/reply to the app-side usb-serial modem server. */\n'
+        'static bool uknl_modem_call(const char *req, char *resp, size_t resp_sz)\n'
+        '{\n'
+        '\tint s = socket(AF_UNIX, SOCK_STREAM, 0);\n'
+        '\tif (s < 0)\n'
+        '\t\treturn false;\n'
+        '\tstruct timeval tv = { .tv_sec = 1, .tv_usec = 0 };\n'
+        '\tsetsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);\n'
+        '\tsetsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);\n'
+        '\tstruct sockaddr_un a;\n'
+        '\tmemset(&a, 0, sizeof a);\n'
+        '\ta.sun_family = AF_UNIX;\n'
+        '\tconst char *name = "io.neoterm.ttyusb";\n'
+        '\ta.sun_path[0] = \'\\0\';\t\t\t\t/* abstract namespace */\n'
+        '\tstrncpy(a.sun_path + 1, name, sizeof(a.sun_path) - 2);\n'
+        '\tsocklen_t len = sizeof(a.sun_family) + 1 + strlen(name);\n'
+        '\tif (connect(s, (struct sockaddr *) &a, len) < 0) {\n'
+        '\t\tclose(s);\n'
+        '\t\treturn false;\n'
+        '\t}\n'
+        '\tsize_t rl = strlen(req);\n'
+        '\tbool ok = write(s, req, rl) == (ssize_t) rl;\n'
+        '\tssize_t n = ok ? read(s, resp, resp_sz - 1) : -1;\n'
+        '\tclose(s);\n'
+        '\tif (n <= 0)\n'
+        '\t\treturn false;\n'
+        '\tresp[n] = \'\\0\';\n'
+        '\treturn true;\n'
+        '}\n'
+        '\n'
+        '/* NeoTerm: forward a PTY modem-control/break ioctl to the usb-serial bridge.\n'
+        ' * Returns true if handled (caller PR_void\'s the syscall with result 0). */\n'
+        'static bool maybe_proxy_modem(Tracee *tracee, word_t cmd, word_t fd, word_t arg)\n'
+        '{\n'
+        '\tchar link[64], path[PATH_MAX], req[PATH_MAX + 64], resp[64];\n'
+        '\tint bits = 0;\n'
+        '\tssize_t pl;\n'
+        '\n'
+        '\tsnprintf(link, sizeof(link), "/proc/%d/fd/%d", tracee->pid, (int) fd);\n'
+        '\tpl = readlink(link, path, sizeof(path) - 1);\n'
+        '\tif (pl <= 0)\n'
+        '\t\treturn false;\n'
+        '\tpath[pl] = \'\\0\';\n'
+        '\tif (strncmp(path, "/dev/pts/", 9) != 0)\t/* our /dev/ttyUSB* are PTY slaves */\n'
+        '\t\treturn false;\n'
+        '\n'
+        '\tswitch (cmd) {\n'
+        '\tcase TIOCMGET:\n'
+        '\t\tsnprintf(req, sizeof(req), "GET %s\\n", path);\n'
+        '\t\tif (!uknl_modem_call(req, resp, sizeof(resp)) || strncmp(resp, "NAK", 3) == 0)\n'
+        '\t\t\treturn false;\n'
+        '\t\tbits = atoi(resp);\n'
+        '\t\treturn write_data(tracee, arg, &bits, sizeof(bits)) >= 0;\n'
+        '\tcase TIOCMSET:\n'
+        '\tcase TIOCMBIS:\n'
+        '\tcase TIOCMBIC:\n'
+        '\t\tif (read_data(tracee, &bits, arg, sizeof(bits)) < 0)\n'
+        '\t\t\treturn false;\n'
+        '\t\tsnprintf(req, sizeof(req), "%s %s %d\\n",\n'
+        '\t\t\tcmd == TIOCMSET ? "SET" : cmd == TIOCMBIS ? "BIS" : "BIC", path, bits);\n'
+        '\t\treturn uknl_modem_call(req, resp, sizeof(resp)) && strncmp(resp, "NAK", 3) != 0;\n'
+        '\tcase TIOCSBRK:\n'
+        '\tcase TIOCCBRK:\n'
+        '\t\tsnprintf(req, sizeof(req), "BRK %s %d\\n", path, cmd == TIOCSBRK ? 1 : 0);\n'
+        '\t\treturn uknl_modem_call(req, resp, sizeof(resp)) && strncmp(resp, "NAK", 3) != 0;\n'
+        '\tcase TCSBRK:\n'
+        '\t\tsnprintf(req, sizeof(req), "BRK %s p\\n", path);\n'
+        '\t\treturn uknl_modem_call(req, resp, sizeof(resp)) && strncmp(resp, "NAK", 3) != 0;\n'
+        '\tdefault:\n'
+        '\t\treturn false;\n'
+        '\t}\n'
+        '}\n\n')
+    anchor_fn = 'static bool maybe_fake_siocgifindex(Tracee *tracee, word_t cmd, word_t arg)\n{'
+    must(anchor_fn in s, "enter.c siocgifindex fn anchor")
+    s = s.replace(anchor_fn, func + anchor_fn, 1)
+    anchor_case = ('\t\tif (cmd == SIOCGIFINDEX && maybe_fake_siocgifindex(tracee, cmd, arg)) {\n'
+                   '\t\t\tpoke_reg(tracee, SYSARG_RESULT, 0);\n'
+                   '\t\t\tset_sysnum(tracee, PR_void);\n'
+                   '\t\t\tbreak;\n'
+                   '\t\t}')
+    must(anchor_case in s, "enter.c siocgifindex case anchor")
+    new_case = anchor_case + (
+        '\n\n\t\tif ((cmd == TIOCMGET || cmd == TIOCMSET || cmd == TIOCMBIS || cmd == TIOCMBIC\n'
+        '\t\t     || cmd == TIOCSBRK || cmd == TIOCCBRK || cmd == TCSBRK)\n'
+        '\t\t    && maybe_proxy_modem(tracee, cmd, peek_reg(tracee, CURRENT, SYSARG_1), arg)) {\n'
+        '\t\t\tpoke_reg(tracee, SYSARG_RESULT, 0);\n'
+        '\t\t\tset_sysnum(tracee, PR_void);\n'
+        '\t\t\tbreak;\n'
+        '\t\t}')
+    s = s.replace(anchor_case, new_case, 1)
+    wr(EN, s)
+
 print("ALL PATCHES APPLIED OK")
