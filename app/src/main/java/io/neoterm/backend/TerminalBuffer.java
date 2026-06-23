@@ -94,6 +94,11 @@ public final class TerminalBuffer {
     return mActiveTranscriptRows;
   }
 
+  /** Drop the scrollback transcript (CSI 3 J), keeping the visible screen. */
+  public void clearTranscript() {
+    mActiveTranscriptRows = 0;
+  }
+
   public int getActiveRows() {
     return mActiveTranscriptRows + mScreenRows;
   }

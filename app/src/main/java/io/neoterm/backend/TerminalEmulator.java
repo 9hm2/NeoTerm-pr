@@ -1700,6 +1700,11 @@ public final class TerminalEmulator {
             // move..
             blockClear(0, 0, mColumns, mRows);
             break;
+          case 3: // Erase the scrollback / saved lines (xterm extension). `clear` sends this so the
+            // transcript doesn't linger after clearing (it also fixes a vertical drift on resize
+            // when a large transcript stayed behind a blank screen).
+            mScreen.clearTranscript();
+            break;
           default:
             unknownSequence(b);
             return;
