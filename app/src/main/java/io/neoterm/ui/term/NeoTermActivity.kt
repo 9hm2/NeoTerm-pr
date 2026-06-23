@@ -1033,6 +1033,13 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     NeoPreference.store(R.string.key_ui_fullscreen, fullScreen)
     // Apply immediately (no activity recreate needed) so the toggle takes effect at once.
     applyImmersiveMode(fullScreen)
+    if (!fullScreen) {
+      // Leaving full screen: the keyboard auto-hide (toggleToolbar) may have slid the action bar
+      // out while in full screen, and it won't run again once full screen is off — so the bar
+      // would stay hidden. Restore it to the state the current tab wants.
+      toolbar.translationY = 0f
+      toolbar.visibility = if (tab is XSessionTab) View.GONE else View.VISIBLE
+    }
   }
 
   /**
