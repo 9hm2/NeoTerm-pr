@@ -229,6 +229,12 @@ statx_new = r'''int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config
 			int m, o, g;
 			buf[n] = '\0';
 			if (sscanf(buf, "%d %d %d", &m, &o, &g) == 3) {
+				if (state->statx_buf.stx_mask & STATX_MODE) {
+					state->statx_buf.stx_mode = (unsigned short)(((mode_t) otod(m))
+						| (state->statx_buf.stx_mode & S_IFMT)
+						| (state->statx_buf.stx_mode & 07000));
+					state->updated_stats = true;
+				}
 				if (state->statx_buf.stx_mask & STATX_UID) {
 					state->statx_buf.stx_uid = (uint32_t) o;
 					state->updated_stats = true;
