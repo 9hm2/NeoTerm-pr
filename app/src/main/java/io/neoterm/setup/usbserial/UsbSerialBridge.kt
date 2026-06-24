@@ -88,8 +88,13 @@ object UsbSerialBridge {
       Kmsg.log("usb-serial: ready — virtual hotplug ports /dev/ttyUSB0..${POOL - 1}")
       while (true) {
         val c = try { srv.accept() } catch (e: Exception) { break }
-        runCatching { handleControl(c) }
-        runCatching { c.close() }
+        // One handler thread per connection: the proot modem proxy holds a single
+        // persistent connection for the lifetime of an open port, so serving it on
+        // the accept thread would block LIST/PATH queries (getdents injection).
+        Thread({
+          runCatching { serveControl(c) }
+          runCatching { c.close() }
+        }, "ttyusb-conn").apply { isDaemon = true; start() }
       }
     }, "ttyusb-control").apply { isDaemon = true; start() }
   }
@@ -202,25 +207,32 @@ object UsbSerialBridge {
   // SET|BIS|BIC <pts> <bits>-> "OK" | "NAK"
   // BRK <pts> <0|1|p>       -> "OK" | "NAK"
   // modem bits = Linux TIOCM_*: DTR 0x002 RTS 0x004 CTS 0x020 CAR 0x040 RNG 0x080 DSR 0x100
-  private fun handleControl(c: LocalSocket) {
-    val line = c.inputStream.bufferedReader().readLine()?.trim() ?: return
+  private fun serveControl(c: LocalSocket) {
+    val reader = c.inputStream.bufferedReader()
     val out = c.outputStream
     fun reply(s: String) { out.write((s + "\n").toByteArray()); out.flush() }
-    val parts = line.split(" ")
-    when (parts.getOrNull(0)) {
-      "PATH" -> {
-        val tty = parts.getOrNull(1)
-        val pts = synchronized(this) {
-          slots.firstOrNull { it.ttyName == tty && it.slavePath != null && it.port != null }?.slavePath
+    // Loop over newline-delimited requests so a persistent client (the proot modem
+    // proxy) can issue a burst of SET/BIS/BIC/GET without reconnecting. Returns when
+    // the peer closes (readLine == null) — i.e. on proot exit or a dropped socket.
+    while (true) {
+      val line = (reader.readLine() ?: return).trim()
+      if (line.isEmpty()) continue
+      val parts = line.split(" ")
+      when (parts.getOrNull(0)) {
+        "PATH" -> {
+          val tty = parts.getOrNull(1)
+          val pts = synchronized(this) {
+            slots.firstOrNull { it.ttyName == tty && it.slavePath != null && it.port != null }?.slavePath
+          }
+          reply(pts ?: "NAK")
         }
-        reply(pts ?: "NAK")
+        "LIST" -> {
+          val active = synchronized(this) { slots.filter { it.slavePath != null }.map { it.ttyName } }
+          reply(if (active.isEmpty()) "-" else active.joinToString(" "))
+        }
+        "GET", "SET", "BIS", "BIC", "BRK" -> handleModem(parts, ::reply)
+        else -> reply("NAK")
       }
-      "LIST" -> {
-        val active = synchronized(this) { slots.filter { it.slavePath != null }.map { it.ttyName } }
-        reply(if (active.isEmpty()) "-" else active.joinToString(" "))
-      }
-      "GET", "SET", "BIS", "BIC", "BRK" -> handleModem(parts, ::reply)
-      else -> reply("NAK")
     }
   }
 
