@@ -96,6 +96,8 @@ object SensorBridge {
   private var appContext: Context? = null
   private var sensorManager: SensorManager? = null
   private var sensorThread: HandlerThread? = null
+  private var sensorHandler: Handler? = null
+  private val sensorObjs = ConcurrentHashMap<Int, Sensor>() // type -> Sensor (for rate changes)
   private var batteryReceiver: BroadcastReceiver? = null
   private var iioServer: LocalServerSocket? = null
 
@@ -116,12 +118,14 @@ object SensorBridge {
     override fun onSensorChanged(e: SensorEvent) {
       val type = e.sensor.type
       val dir = devDirs[type] ?: return
-      val now = SystemClock.elapsedRealtime()
-      if (now - (lastTick[type] ?: 0L) < MIN_INTERVAL_MS) return
-      lastTick[type] = now
-      for ((n, c) in dynamicFiles(type, e.values)) write(dir, n, c)
-      // Buffered stream: emit one packed scan record while the buffer is enabled.
+      // Buffered stream: emit EVERY sample (un-throttled) so iio_readdev fills fast.
       if (pumping[type] == true) emitScan(type, e.values)
+      // Polled sysfs files: throttle to ~5 Hz (plenty for cat / iio_info).
+      val now = SystemClock.elapsedRealtime()
+      if (now - (lastTick[type] ?: 0L) >= MIN_INTERVAL_MS) {
+        lastTick[type] = now
+        for ((n, c) in dynamicFiles(type, e.values)) write(dir, n, c)
+      }
     }
 
     override fun onAccuracyChanged(s: Sensor?, accuracy: Int) {}
@@ -162,7 +166,9 @@ object SensorBridge {
     batteryReceiver = null
     runCatching { sensorThread?.quitSafely() }
     sensorThread = null
+    sensorHandler = null
     sensorManager = null
+    sensorObjs.clear()
     observers.forEach { runCatching { it.stopWatching() } }
     observers.clear()
     runCatching { iioServer?.close() }
@@ -185,9 +191,11 @@ object SensorBridge {
     val thread = HandlerThread("sensor-capture").apply { start() }
     sensorThread = thread
     val handler = Handler(thread.looper)
+    sensorHandler = handler
     var idx = 0
     for (type in SUPPORTED) {
       val s = sm.getDefaultSensor(type) ?: continue
+      sensorObjs[type] = s
       val dir = File(iioDevDir, "iio:device$idx").apply { mkdirs() }
       devDirs[type] = dir
       devIndex[type] = idx
@@ -299,12 +307,22 @@ object SensorBridge {
       ensurePty(type)
       if (pumping[type] != true) {
         pumping[type] = true
+        setRate(type, SensorManager.SENSOR_DELAY_GAME)   // ~50 Hz so the stream fills fast
         Kmsg.log("sensors: iio:device${devIndex[type]} buffer enabled (${en.size} ch)")
       }
     } else if (pumping[type] == true) {
       pumping[type] = false
+      setRate(type, SensorManager.SENSOR_DELAY_NORMAL)   // back to low power
       Kmsg.log("sensors: iio:device${devIndex[type]} buffer disabled")
     }
+  }
+
+  /** Re-register a sensor at a new delay (faster while its buffer streams). */
+  private fun setRate(type: Int, delay: Int) {
+    val sm = sensorManager ?: return
+    val s = sensorObjs[type] ?: return
+    val h = sensorHandler ?: return
+    runCatching { sm.unregisterListener(listener, s); sm.registerListener(listener, s, delay, h) }
   }
 
   /** One packed little-endian scan record of the enabled channels → PTY master. */
