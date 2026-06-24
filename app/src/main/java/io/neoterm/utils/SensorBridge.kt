@@ -75,6 +75,7 @@ object SensorBridge {
   // the whole context with EACCES. Shadow them with empty dirs so the scans
   // succeed (find nothing) instead of hitting the denied paths.
   private val hwmonDir = File("${NeoTermPath.PROOT_ROOT_PATH}/sys-class-hwmon")
+  private val hwmon0 = File(hwmonDir, "hwmon0")   // lm-sensors chip (battery temp/volt + ambient)
   private val debugIioDir = File("${NeoTermPath.PROOT_ROOT_PATH}/sys-kernel-debug-iio")
   private val batDir = File(psDir, "BAT0")
   private val acDir = File(psDir, "AC0")
@@ -125,6 +126,9 @@ object SensorBridge {
       if (now - (lastTick[type] ?: 0L) >= MIN_INTERVAL_MS) {
         lastTick[type] = now
         for ((n, c) in dynamicFiles(type, e.values)) write(dir, n, c)
+        // hwmon ambient temperature (milli°C) for lm-sensors.
+        if (type == Sensor.TYPE_AMBIENT_TEMPERATURE && e.values.isNotEmpty())
+          write(hwmon0, "temp2_input", "${(e.values[0] * 1000).roundToInt()}\n")
       }
     }
 
@@ -151,6 +155,12 @@ object SensorBridge {
     appContext = context.applicationContext
     started = true
     psDir.mkdirs(); iioDevDir.mkdirs()
+    // hwmon chip for lm-sensors (`sensors`): libsensors reads /sys/class/hwmon
+    // directly (no udev), so a fake chip with temp/voltage channels just works.
+    hwmon0.mkdirs()
+    write(hwmon0, "name", "neoterm\n")
+    write(hwmon0, "temp1_label", "battery\n")
+    write(hwmon0, "in0_label", "vbat\n")
     registerBattery()
     registerSensors()
     startIioServer()
@@ -202,6 +212,7 @@ object SensorBridge {
       typeByIndex[idx] = type
       write(dir, "name", staticName(type) + "\n")
       staticScale(type)?.let { (n, c) -> write(dir, n, c + "\n") }
+      if (type == Sensor.TYPE_AMBIENT_TEMPERATURE) write(hwmon0, "temp2_label", "ambient\n")
       if (type in BUFFERED) scaffoldBuffer(type, dir, idx)
       runCatching { sm.registerListener(listener, s, SensorManager.SENSOR_DELAY_NORMAL, handler) }
       Kmsg.log("sensors: iio:device$idx <- ${staticName(type)} (${s.name})")
@@ -427,6 +438,9 @@ object SensorBridge {
     write(batDir, "health", "$healthStr\n")
     if (voltageMv >= 0) write(batDir, "voltage_now", "${voltageMv * 1000L}\n")   // µV
     if (tempTenths != Int.MIN_VALUE) write(batDir, "temp", "$tempTenths\n")       // tenths °C
+    // Mirror into the hwmon chip for lm-sensors (temp in milli°C, voltage in mV).
+    if (tempTenths != Int.MIN_VALUE) write(hwmon0, "temp1_input", "${tempTenths * 100}\n")
+    if (voltageMv >= 0) write(hwmon0, "in0_input", "$voltageMv\n")
     curNow?.let { write(batDir, "current_now", "$it\n") }                          // µA
     chargeCounter?.let {
       write(batDir, "charge_counter", "$it\n")                                     // µAh
