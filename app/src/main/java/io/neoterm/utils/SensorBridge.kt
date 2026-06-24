@@ -154,6 +154,7 @@ object SensorBridge {
     registerBattery()
     registerSensors()
     startIioServer()
+    startBufferPoller()
     Kmsg.log("sensors: bridge active — /sys/class/power_supply, /sys/bus/iio/devices")
   }
 
@@ -288,6 +289,17 @@ object SensorBridge {
       observers.add(obs)
       runCatching { obs.startWatching() }
     }
+  }
+
+  /** inotify/FileObserver doesn't cross the proot boundary reliably, so also poll
+   *  the enable files of opened buffered devices and toggle the pump from there. */
+  private fun startBufferPoller() {
+    Thread({
+      while (started) {
+        try { Thread.sleep(100) } catch (e: InterruptedException) { break }
+        for (type in BUFFERED) if (ptySlave.containsKey(type)) onBufferToggle(type)
+      }
+    }, "iio-buffer-poll").apply { isDaemon = true; start() }
   }
 
   /** The guest wrote buffer{,0}/enable — (re)read the enable + enabled channels
