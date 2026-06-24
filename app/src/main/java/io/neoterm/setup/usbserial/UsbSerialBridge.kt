@@ -310,6 +310,11 @@ object UsbSerialBridge {
         if (ready > 0 && (pollfd.revents.toInt() and OsConstants.POLLIN) != 0) {
           val n = try { Os.read(masterJfd, buf, 0, buf.size) } catch (e: Exception) { break }
           if (n <= 0) break
+          // Reprogram the chip BEFORE these bytes go out: esptool/avrdude switch the
+          // pts baud (e.g. 115200 -> 460800) and immediately send at the new rate, so
+          // applying params only in the rx loop (behind a 200ms port.read) would let
+          // post-switch bytes leave at the old baud -> "No serial data received".
+          applyParamsIfChanged(slot, masterFd)
           runCatching { slot.port?.write(buf.copyOf(n), 1000) }
         }
       }
@@ -328,7 +333,9 @@ object UsbSerialBridge {
     }
   }
 
-  private fun applyParamsIfChanged(slot: Slot, masterFd: Int) {
+  // Called from both pump threads (rx loop + tx before write); the lock makes the
+  // read-compare-apply atomic so a baud change is programmed exactly once.
+  private fun applyParamsIfChanged(slot: Slot, masterFd: Int) = synchronized(slot) {
     val port = slot.port ?: return
     val p = runCatching { Pty.serialParams(masterFd) }.getOrNull() ?: return
     if (p.contentEquals(slot.lastParams)) return
