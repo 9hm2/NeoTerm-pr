@@ -79,8 +79,15 @@ banner() {
 }
 fmt() {
   while IFS= read -r ln; do
-    m=${'$'}{ln#<*>}
-    if [ "${'$'}notime" = 1 ]; then printf '%s\n' "${'$'}m"; else emit "${'$'}m" "${'$'}up"; fi
+    # NeoTerm writes "<seconds>;<msg>" (timestamp recorded at log time). Use that
+    # per-line timestamp; fall back to the read-time uptime for raw guest writes
+    # (echo msg > /dev/kmsg) and old-format lines, stripping any <prio> prefix.
+    ts=${'$'}{ln%%;*}; rest=${'$'}{ln#*;}
+    case "${'$'}ts" in
+      ''|*[!0-9.]*|*.*.*) m=${'$'}{ln#<*>}; t=${'$'}up ;;
+      *)                  m=${'$'}rest;     t=${'$'}ts ;;
+    esac
+    if [ "${'$'}notime" = 1 ]; then printf '%s\n' "${'$'}m"; else emit "${'$'}m" "${'$'}t"; fi
   done
 }
 banner
