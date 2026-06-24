@@ -168,6 +168,11 @@ object ProotManager {
     // implemented") — e.g. PostgreSQL's postmaster interlock segment. The Termux
     // proot fork implements this; harmless for apps that don't use SysV IPC.
     args.add("--sysvipc")
+    // Enable the hidden_files extension (-H). It hides ".proot." files (we have
+    // none — ownership is in xattrs), and crucially it carries our getdents
+    // injection that makes the virtual /dev/ttyUSB* hotplug ports show up in
+    // directory listings (ls /dev/ttyUSB*, pyserial's /dev/ttyUSB* glob).
+    args.add("-H")
     args.add("-0")                 // fake root: a guest uid/gid 0-t lát
     args.add("-r"); args.add(rootfs)
 
