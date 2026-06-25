@@ -87,10 +87,16 @@ static int ukfs_do_mount(void)
 	int s = ukfs_conn();
 	if (s < 0) { uk_dbg_line("uk_fs: ukfs_conn FAILED (cannot reach io.neoterm.fs)\n"); return -1; }
 	{
-		ssize_t wn = write(s, "MOUNT auto uksd0\n", 16);
-		char l[96]; snprintf(l, sizeof l, "uk_fs: write fd=%d -> %zd errno=%d\n", s, wn, (wn < 0 ? errno : 0));
+		/* NB: send the FULL command INCLUDING the trailing '\n' — ukfsd's
+		 * read_line() blocks until it sees the newline. Use strlen (not a
+		 * hard-coded length) so the byte count can never drift from the literal,
+		 * and uksd_wn so partial writes / EINTR are handled. */
+		static const char REQ[] = "MOUNT auto uksd0\n";
+		int wn = uksd_wn(s, REQ, sizeof REQ - 1);
+		char l[96]; snprintf(l, sizeof l, "uk_fs: write fd=%d -> %d (%zu) errno=%d\n",
+		                     s, wn, sizeof REQ - 1, (wn < 0 ? errno : 0));
 		uk_dbg_line(l);
-		if (wn != 16) { ukfs_sdrop(); return -1; }
+		if (wn < 0) { ukfs_sdrop(); return -1; }
 	}
 	char line[64];
 	if (uksd_rl(s, line, sizeof line) < 0) { uk_dbg_line("uk_fs: MOUNT no reply\n"); ukfs_sdrop(); return -1; }
@@ -431,7 +437,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v4-eintr UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v5-newline UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
