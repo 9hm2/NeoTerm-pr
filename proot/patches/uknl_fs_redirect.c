@@ -359,16 +359,26 @@ static void uk_dbg(Tracee *tracee, const char *line)
 
 static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 {
-	/* --- TEMP DEBUG: trace every mount(2) into dmesg. --- */
+	/* --- TEMP DEBUG v3: one-time INIT line at the first syscall (shows the raw
+	 * env proot actually sees), plus a per-mount(2) trace. Both go to the app's
+	 * kmsg buffer -> visible in `dmesg | grep uk_fs`. --- */
+	static int uk_dbg_init = 0;
+	if (!uk_dbg_init) {
+		uk_dbg_init = 1;
+		char l[256];
+		snprintf(l, sizeof l, "uk_fs: INIT v3 UK_FS='%s' UK_BLOCK='%s'\n",
+		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
+		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
+		uk_dbg(tracee, l);
+	}
 	if (nr == PR_mount) {
 		word_t dsa = peek_reg(tracee, CURRENT, SYSARG_1);
 		char dbg[PATH_MAX] = {0};
 		if (dsa) read_string(tracee, dbg, dsa, sizeof dbg);
 		char line[PATH_MAX + 160];
 		snprintf(line, sizeof line,
-		         "uk_fs: PR_mount src='%s' UK_FS='%s' UK_BLOCK='%s' is_dev=%d\n",
-		         dbg, getenv("UK_FS") ? getenv("UK_FS") : "(null)",
-		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)", ukfs_src_is_dev(dbg));
+		         "uk_fs: PR_mount src='%s' on=%d is_dev=%d\n",
+		         dbg, uk_fs_on(), ukfs_src_is_dev(dbg));
 		uk_dbg(tracee, line);
 	}
 
