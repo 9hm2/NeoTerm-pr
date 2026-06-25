@@ -29,6 +29,28 @@ object FsBridge {
     return if (f.canExecute()) f.absolutePath else null
   }
 
+  /**
+   * Kill any leaked ukfsd from a previous app process. ukfsd can be reparented
+   * to init and survive an app upgrade/restart, keeping the abstract socket
+   * @io.neoterm.fs bound — the freshly launched ukfsd would then fail to bind
+   * and exit, leaving the stale (old-code) daemon serving requests. Scan /proc
+   * for same-UID processes whose cmdline is our libukfsd.so and SIGKILL them.
+   */
+  private fun killStale() {
+    val self = android.os.Process.myPid()
+    runCatching {
+      File("/proc").listFiles { f -> f.isDirectory && f.name.all(Char::isDigit) }?.forEach { p ->
+        val pid = p.name.toIntOrNull() ?: return@forEach
+        if (pid == self) return@forEach
+        val cmd = runCatching { File(p, "cmdline").readText() }.getOrNull() ?: return@forEach
+        if (cmd.contains("libukfsd.so")) {
+          Kmsg.log("usb-fs: killing stale ukfsd pid=$pid")
+          runCatching { android.os.Process.killProcess(pid) }
+        }
+      }
+    }
+  }
+
   @Synchronized
   fun ensureReady() {
     if (started) return
@@ -37,6 +59,7 @@ object FsBridge {
       Kmsg.log("usb-fs: libukfsd.so not found / not executable — FS redirect disabled")
       return
     }
+    killStale()   // clear any leaked ukfsd holding @io.neoterm.fs from a prior run
     // ukfsd defaults: listen on io.neoterm.fs, read sectors over io.neoterm.block.
     val log = File(App.get().filesDir, "ukfsd.log")
     proc = try {
