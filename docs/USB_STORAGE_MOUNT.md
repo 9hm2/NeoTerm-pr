@@ -126,13 +126,36 @@ matching `libukfs_all.so`'s lazy mount.
 
 ## Build / wiring
 
-- Vendored uKernel FS engine: `app/src/main/cpp/ukfs/` (kernel_shim, `vfs.c`,
-  `linux/fs/{fat,exfat,ntfs3,ext4}`, `ukfsd.c` server front-end).
-- NDK build (CMake) cross-compiles for `aarch64` / bionic. The kernel FS drivers
-  were written for glibc; bionic gaps are absorbed in the shim (iteration on-device).
-- `FsBridge.kt` launches `ukfsd`, ensures `io.neoterm.fs` + `io.neoterm.block` are
-  up, and ties their lifecycle to the proot session.
-- `ProotManager` passes `UK_FS=1` (alongside `UK_BLOCK=1`) when USB-storage is on,
-  enabling the proot VFS-redirect.
+- Vendored uKernel FS engine: `app/src/main/cpp/ukfs/` (kernel shim, `vfs.c`,
+  `linux/fs/fat` (vfat; exfat/ntfs3/ext4 sources to be vendored next), `ukfsd.c`
+  server front-end, `block_sock.c` block-over-socket backend).
+- NDK build (CMake, `UKFS_BUILD=ON`) cross-compiles for `aarch64`/bionic and
+  emits `ukfsd` as `libukfsd.so` so AGP packages it like `libproot.so`. The
+  kernel FS drivers were written against glibc; the bionic gaps are absorbed by
+  chaining the fake `<linux/{signal,time,fcntl,socket}.h>` to the real toolchain
+  headers on `__BIONIC__`, a minimal fake `<pthread.h>` (no libc cascade),
+  `__BIONIC__`-guarded `__kernel_fsid_t`, and `compat_bionic.c` weak shims.
+- `block_sock.c`: on Android there is no real `/dev/uksd0`; a `@io.neoterm.block`
+  devpath makes `vfs.c` proxy sector I/O over the block socket instead of
+  pread/pwrite on a local fd. `MOUNT auto` probes vfat/exfat/ntfs3/ext4.
+- `FsBridge.kt` launches `ukfsd` (serves `io.neoterm.fs`), ensures
+  `io.neoterm.block` ([BlockBridge]) is up, and ties the lifecycle to the proot
+  session (started from `ProotManager`, stopped from `NeoTermService`).
+- `ProotManager` passes `UK_FS=1` (alongside `UK_BLOCK=1`) when USB-storage is
+  on, enabling the proot VFS-redirect (`enter.c`/`exit.c`/`seccomp.c`, injected
+  by `patches/uknl_fs_redirect.c`).
+
+### Validation status
+
+- Native stack runtime-validated on host (x86_64/glibc) against a real FAT32
+  image: the vfat driver mounts, lists, reads and writes; ukfsd answers the full
+  `io.neoterm.fs` protocol; and the block-over-socket backend reads/writes
+  sectors over a stand-in `io.neoterm.block` server (mtools cross-checks the
+  on-disk result). The whole engine + ukfsd + `block_sock.c` cross-compile and
+  link for `aarch64`/bionic.
+- The proot VFS-redirect (mount/open/read/getdents/write/...) compiles
+  `-Wall -Wextra` against proot-symbol stubs, its getdents synthesis is
+  unit-tested, and the patch applies cleanly into `enter.c`/`exit.c`/`seccomp.c`;
+  the ptrace half is validated on-device, like the existing block proxy.
 </content>
 </invoke>
