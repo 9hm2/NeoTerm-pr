@@ -197,6 +197,43 @@ static int ukfs_create_at(const char *rel, unsigned mode)
 	return (line[0] == 'O' && line[1] == 'K') ? 0 : -1;
 }
 
+/* WRITE <off> <len> <path> + payload: bytes written, or -1. */
+static long ukfs_write_at(const char *rel, long long off, const void *buf, size_t len)
+{
+	int s = ukfs_conn(); if (s < 0) return -1;
+	char req[PATH_MAX + 48];
+	int rl = snprintf(req, sizeof req, "WRITE %lld %zu %s\n", off, len, rel);
+	if (uksd_wn(s, req, rl) < 0 || uksd_wn(s, buf, len) < 0) { ukfs_sdrop(); return -1; }
+	char line[64]; if (uksd_rl(s, line, sizeof line) < 0) { ukfs_sdrop(); return -1; }
+	long n; if (sscanf(line, "OK %ld", &n) != 1) return -1;
+	return n;
+}
+
+/* "<prefix><path>" ops (prefix carries the command + any leading numeric args
+ * and a trailing space, e.g. "MKDIR 511 "). Returns 0, or -errno from ukfsd. */
+static int ukfs_simple(const char *prefix, const char *rel)
+{
+	int s = ukfs_conn(); if (s < 0) return -1;
+	char req[PATH_MAX + 64];
+	int rl = snprintf(req, sizeof req, "%s%s\n", prefix, rel);
+	if (uksd_wn(s, req, rl) < 0) { ukfs_sdrop(); return -1; }
+	char line[64]; if (uksd_rl(s, line, sizeof line) < 0) { ukfs_sdrop(); return -1; }
+	if (line[0] == 'O' && line[1] == 'K') return 0;
+	int e; return (sscanf(line, "ERR %d", &e) == 1) ? -e : -1;
+}
+
+/* Two byte-counted paths in the payload (RENAME old/new, SYMLINK target/link). */
+static int ukfs_two_path(const char *cmd, const char *a, const char *b)
+{
+	int s = ukfs_conn(); if (s < 0) return -1;
+	size_t al = strlen(a), bl = strlen(b);
+	char req[64]; int rl = snprintf(req, sizeof req, "%s %zu %zu\n", cmd, al, bl);
+	if (uksd_wn(s, req, rl) < 0 || uksd_wn(s, a, al) < 0 || uksd_wn(s, b, bl) < 0) { ukfs_sdrop(); return -1; }
+	char line[64]; if (uksd_rl(s, line, sizeof line) < 0) { ukfs_sdrop(); return -1; }
+	if (line[0] == 'O' && line[1] == 'K') return 0;
+	int e; return (sscanf(line, "ERR %d", &e) == 1) ? -e : -1;
+}
+
 /* ---- vfd table: a guest fd (over a placeholder file) -> a ukfsd path. The
  *      guest opens a real placeholder (/dev/null or /), gets a real fd, and
  *      every read/lseek/getdents/close on it is proxied here. ---- */
@@ -347,6 +384,33 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (nr == PR_read) v->off += n;
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) n); set_sysnum(tracee, PR_void); return true;
 	}
+	if (nr == PR_write || nr == PR_pwrite64) {
+		struct ukfs_vfd *v = vfd_find(tracee->pid, (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		if (!v || v->isdir) return false;
+		long long pos = (nr == PR_pwrite64)
+			? (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_4) : v->off;
+		size_t len = (size_t) peek_reg(tracee, CURRENT, SYSARG_3);
+		word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
+		if (len == 0) { poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true; }
+		if (len > (8u << 20)) len = 8u << 20;
+		void *tmp = malloc(len); if (!tmp) return false;
+		if (read_data(tracee, tmp, buf, len) < 0) {
+			free(tmp); poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EFAULT); set_sysnum(tracee, PR_void); return true;
+		}
+		long n = ukfs_write_at(v->path, pos, tmp, len);
+		free(tmp);
+		if (n < 0) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EIO); set_sysnum(tracee, PR_void); return true; }
+		if (nr == PR_write) v->off += n;
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) n); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_ftruncate) {
+		struct ukfs_vfd *v = vfd_find(tracee->pid, (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		if (!v) return false;
+		long long sz = (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_2);
+		char pfx[48]; snprintf(pfx, sizeof pfx, "TRUNCATE %lld ", sz);
+		int r = ukfs_simple(pfx, v->path);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
+	}
 	if (nr == PR_lseek) {
 		struct ukfs_vfd *v = vfd_find(tracee->pid, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v) return false;
@@ -428,6 +492,71 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if ((size_t) n > bufsz) n = (long) bufsz;
 		if (n > 0) write_data(tracee, buf, tgt, (size_t) n);
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) n); set_sysnum(tracee, PR_void); return true;
+	}
+
+	/* path-based metadata/namespace ops under the vmount. */
+	if (nr == PR_mkdirat) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		unsigned mode = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3) & 07777;
+		char pfx[48]; snprintf(pfx, sizeof pfx, "MKDIR %u ", mode);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_simple(pfx, rel)); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_unlinkat) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		int flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+		int r = ukfs_simple((flags & 0x200) ? "RMDIR " : "UNLINK ", rel);   /* AT_REMOVEDIR */
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_symlinkat) {
+		word_t ta = peek_reg(tracee, CURRENT, SYSARG_1);    /* target, stored verbatim */
+		word_t la = peek_reg(tracee, CURRENT, SYSARG_3);    /* link path (an FS path) */
+		char target[PATH_MAX], lp[PATH_MAX], rel[PATH_MAX];
+		if (!ta || read_string(tracee, target, ta, sizeof target) <= 0) return false;
+		if (!la || read_string(tracee, lp, la, sizeof lp) <= 0) return false;
+		if (!ukfs_rel(lp, rel, sizeof rel)) return false;
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_two_path("SYMLINK", target, rel)); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_fchmodat) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		unsigned mode = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3) & 07777;
+		char pfx[48]; snprintf(pfx, sizeof pfx, "CHMOD %u ", mode);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_simple(pfx, rel)); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_fchownat) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		unsigned uid = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3);
+		unsigned gid = (unsigned) peek_reg(tracee, CURRENT, SYSARG_4);
+		char pfx[64]; snprintf(pfx, sizeof pfx, "CHOWN %u %u ", uid, gid);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_simple(pfx, rel)); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_truncate) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		long long sz = (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_2);
+		char pfx[48]; snprintf(pfx, sizeof pfx, "TRUNCATE %lld ", sz);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_simple(pfx, rel)); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_renameat || nr == PR_renameat2) {
+		word_t oa = peek_reg(tracee, CURRENT, SYSARG_2);
+		word_t na = peek_reg(tracee, CURRENT, SYSARG_4);
+		char og[PATH_MAX], ng[PATH_MAX], orel[PATH_MAX], nrel[PATH_MAX];
+		if (!oa || read_string(tracee, og, oa, sizeof og) <= 0) return false;
+		if (!na || read_string(tracee, ng, na, sizeof ng) <= 0) return false;
+		int uo = ukfs_rel(og, orel, sizeof orel), un = ukfs_rel(ng, nrel, sizeof nrel);
+		if (!uo && !un) return false;
+		if (uo != un) {     /* across the vmount boundary: let userspace copy+unlink */
+			poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EXDEV); set_sysnum(tracee, PR_void); return true;
+		}
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_two_path("RENAME", orel, nrel)); set_sysnum(tracee, PR_void); return true;
 	}
 
 	/* openat under the vmount: rewrite the path to a real placeholder so the
