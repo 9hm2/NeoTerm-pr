@@ -43,8 +43,13 @@ static int ukfs_conn(void)
 	const char *name = "io.neoterm.fs";
 	a.sun_path[0] = '\0'; strncpy(a.sun_path + 1, name, sizeof(a.sun_path) - 2);
 	socklen_t len = sizeof(a.sun_family) + 1 + strlen(name);
-	if (connect(s, (struct sockaddr *) &a, len) < 0) { close(s); return -1; }
-	g_ukfs_sock = s; return s;
+	if (connect(s, (struct sockaddr *) &a, len) < 0) {
+		char l[80]; snprintf(l, sizeof l, "uk_fs: connect io.neoterm.fs FAILED errno=%d\n", errno);
+		uk_dbg_line(l); close(s); return -1;
+	}
+	g_ukfs_sock = s;
+	{ char l[64]; snprintf(l, sizeof l, "uk_fs: connected io.neoterm.fs fd=%d\n", s); uk_dbg_line(l); }
+	return s;
 }
 /* The mount lives in the connection; dropping it loses the mount. */
 static void ukfs_sdrop(void) { if (g_ukfs_sock >= 0) { close(g_ukfs_sock); g_ukfs_sock = -1; } g_vmounted = 0; }
@@ -72,6 +77,7 @@ static int ukfs_rel(const char *guest, char *out, size_t osz)
 /* Tell ukfsd to MOUNT the block device and remember the guest mount point. */
 static int ukfs_mount_dev(const char *target)
 {
+	ukfs_sdrop();   /* always reconnect fresh for a mount (avoid a stale cached fd) */
 	int s = ukfs_conn();
 	if (s < 0) { uk_dbg_line("uk_fs: ukfs_conn FAILED (cannot reach io.neoterm.fs)\n"); return -1; }
 	if (uksd_wn(s, "MOUNT auto uksd0\n", 16) < 0) { uk_dbg_line("uk_fs: MOUNT write failed\n"); ukfs_sdrop(); return -1; }
