@@ -917,6 +917,17 @@ if 'uknl_fs_dispatch' not in s:
                   '\tif (uknl_block_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
                   '\tif (uknl_fs_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
                   '\tswitch (syscall_number) {', 1)
+    # mount(2) is blocked by Android's parent seccomp (SIGSYS), so it never reaches
+    # translate_syscall_enter — proot's SIGSYS handler calls apply_emulated_mount()
+    # directly (tracee/seccomp.c). Hook that common function so the /dev/uksd0
+    # mount redirect runs on BOTH paths. Forward-declare the hook (it's defined
+    # later, in the injected fs block) and call it at the top of the function.
+    am_anchor = 'void apply_emulated_mount(Tracee *tracee)\n{'
+    must(am_anchor in s, "enter.c apply_emulated_mount anchor (fs)")
+    s = s.replace(am_anchor,
+                  'static bool uknl_fs_mount_hook(Tracee *tracee);\n'
+                  'void apply_emulated_mount(Tracee *tracee)\n{\n'
+                  '\tif (uknl_fs_mount_hook(tracee)) return;', 1)
     wr(EN, s)
 
 # ---- syscall/exit.c: capture the fd returned by a redirected openat so reads/

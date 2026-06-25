@@ -364,6 +364,27 @@ static void uk_dbg(Tracee *tracee, const char *line)
 	if (fd >= 0) { (void) write(fd, line, strlen(line)); close(fd); }
 }
 
+/* Mount hook, called from apply_emulated_mount() — the common point for BOTH
+ * the normal mount(2) trap AND the SIGSYS path Android uses to block mount(2)
+ * (which bypasses translate_syscall_enter, hence the redirect's own PR_mount
+ * branch never runs on-device). Returns true if it handled a /dev/uksd0 mount:
+ * tells ukfsd to MOUNT and records the vmount; the caller then reports success
+ * to the guest. */
+static bool uknl_fs_mount_hook(Tracee *tracee)
+{
+	if (!uk_fs_on()) return false;
+	char src[PATH_MAX];
+	if (get_sysarg_path(tracee, src, SYSARG_1) < 0) return false;
+	if (!ukfs_src_is_dev(src)) return false;
+	char tgt[PATH_MAX];
+	if (get_sysarg_path(tracee, tgt, SYSARG_2) < 0) return false;
+	int rc = ukfs_mount_dev(tgt);
+	char l[PATH_MAX + 96];
+	snprintf(l, sizeof l, "uk_fs: MOUNT hook src='%s' tgt='%s' rc=%d\n", src, tgt, rc);
+	uk_dbg(tracee, l);
+	return true;
+}
+
 static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 {
 	/* --- TEMP DEBUG v3: one-time INIT line at the first syscall (shows the raw
