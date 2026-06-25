@@ -57,25 +57,61 @@ esac
 # dmesg proot-hoz: a valódi kernel ring buffer tiltott Androidon, ezért a guest
 # egy ÍRHATÓ /dev/kmsg pufferbe ír (echo msg > /dev/kmsg), ezt olvassuk vissza.
 # A puffer akkumulál: a proot-patch O_APPEND-et kényszerít a /dev/kmsg-re, így a
-# csonkoló `>` sem veszít üzenetet (a törlés ezért truncate-tel megy). NeoTerm.
+# csonkoló `>` sem veszít üzenetet (a törlés ezért truncate-tel megy). A kapcsolók
+# a valódi util-linux dmesg viselkedését követik (időbélyeg-formátumok). NeoTerm.
 KMSG=/dev/kmsg
-clear=0; follow=0; notime=0
+clear=0; follow=0; mode=delta   # delta|notime|ctime|reltime|raw
 for a in "${'$'}@"; do
   case "${'$'}a" in
-    -C|--clear)      truncate -s 0 "${'$'}KMSG" 2>/dev/null; exit 0 ;;
-    -c|--read-clear) clear=1 ;;
+    -C|--clear)        truncate -s 0 "${'$'}KMSG" 2>/dev/null; exit 0 ;;
+    -c|--read-clear)   clear=1 ;;
     -w|--follow|-W|--follow-new) follow=1 ;;
-    -t|--notime)     notime=1 ;;
-    --version)       echo "dmesg (NeoTerm proot kmsg shim)"; exit 0 ;;
-    -h|--help)       echo "Usage: dmesg [-c|-C|-w|-t ...] - NeoTerm proot kmsg buffer"; exit 0 ;;
-    -*)              : ;;
+    -t|--notime)       mode=notime ;;
+    -T|--ctime)        mode=ctime ;;
+    -e|--reltime)      mode=reltime ;;
+    -H|--human)        mode=ctime ;;
+    -r|--raw)          mode=raw ;;
+    -x|--decode|-d|--show-delta|-P|--nopager|-L|--color*|--no-pager) : ;;
+    --version)         echo "dmesg from NeoTerm proot kmsg shim 2.42"; exit 0 ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: dmesg [options]
+NeoTerm proot kmsg buffer shim (echo msg > /dev/kmsg to write).
+
+Options:
+ -C, --clear         clear the kmsg buffer
+ -c, --read-clear    read then clear the buffer
+ -w, --follow        wait for new messages
+ -W, --follow-new    wait and print only new messages
+ -t, --notime        don't print timestamps
+ -T, --ctime         human-readable absolute (ctime) timestamp
+ -e, --reltime       relative timestamp (seconds since boot)
+ -H, --human         human-readable output
+ -r, --raw           print the raw buffer (no timestamp processing)
+ -x, --decode        (accepted, ignored)
+ -h, --help          display this help and exit
+     --version       output version information and exit
+EOF
+      exit 0 ;;
+    -*)                : ;;
   esac
 done
 up=${'$'}(cut -d' ' -f1 /proc/uptime 2>/dev/null || echo 0)
-emit() { printf '[%11.6f] %s\n' "${'$'}2" "${'$'}1"; }
+now=${'$'}(date +%s 2>/dev/null || echo 0)
+boot=${'$'}((now - ${'$'}{up%.*}))   # boot epoch (egész másodperc), a -T/-H számolásához
+emit() { printf '[%11.6f] %s\n' "${'$'}2" "${'$'}1"; }   # delta: [   12.345678]
+show() {   # ${'$'}1=üzenet  ${'$'}2=időbélyeg másodpercben (lehet tört)
+  case "${'$'}mode" in
+    notime)  printf '%s\n' "${'$'}1" ;;
+    raw)     printf '%s\n' "${'$'}1" ;;
+    ctime)   printf '[%s] %s\n' "${'$'}(date -d @${'$'}((boot + ${'$'}{2%.*})) '+%a %b %e %H:%M:%S %Y' 2>/dev/null || echo "${'$'}2")" "${'$'}1" ;;
+    reltime) printf '[%s] %s\n' "${'$'}2" "${'$'}1" ;;
+    *)       emit "${'$'}1" "${'$'}2" ;;
+  esac
+}
 banner() {
-  emit "Linux ${'$'}(uname -r 2>/dev/null || echo unknown) - NeoTerm proot userland (fake root -0)" 0.000000
-  emit "kmsg buffer: ${'$'}KMSG  (write: echo msg > /dev/kmsg)" 0.000100
+  show "Linux ${'$'}(uname -r 2>/dev/null || echo unknown) - NeoTerm proot userland (fake root -0)" 0.000000
+  show "kmsg buffer: ${'$'}KMSG  (write: echo msg > /dev/kmsg)" 0.000100
 }
 fmt() {
   while IFS= read -r ln; do
@@ -87,10 +123,10 @@ fmt() {
       ''|*[!0-9.]*|*.*.*) m=${'$'}{ln#<*>}; t=${'$'}up ;;
       *)                  m=${'$'}rest;     t=${'$'}ts ;;
     esac
-    if [ "${'$'}notime" = 1 ]; then printf '%s\n' "${'$'}m"; else emit "${'$'}m" "${'$'}t"; fi
+    if [ "${'$'}mode" = raw ]; then printf '%s\n' "${'$'}ln"; else show "${'$'}m" "${'$'}t"; fi
   done
 }
-banner
+[ "${'$'}mode" = raw ] || banner
 if [ "${'$'}follow" = 1 ]; then
   { [ -f "${'$'}KMSG" ] && tail -n +1 -f "${'$'}KMSG"; } 2>/dev/null | fmt
 else

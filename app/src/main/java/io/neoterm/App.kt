@@ -29,6 +29,19 @@ class App : Application() {
     NeoPreference.init(this)
     CrashHandler.init()
     NeoInitializer.init(this)
+    freshLogs()
+  }
+
+  /** Start each app process with clean kmsg/ukfsd logs (no previous run), and
+   *  stamp the app version so `dmesg` shows which build is running. */
+  private fun freshLogs() {
+    runCatching {
+      java.io.File(io.neoterm.component.config.NeoTermPath.PROOT_ROOT_PATH, "sysdata/kmsg")
+        .also { it.parentFile?.mkdirs() }.writeText("")
+      java.io.File(filesDir, "ukfsd.log").writeText("")
+      io.neoterm.setup.proot.Kmsg.log(
+        "NeoTerm ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE}) — app start")
+    }
   }
 
   fun errorDialog(context: Context, message: Int, dismissCallback: (() -> Unit)?) {

@@ -65,7 +65,7 @@ object FsBridge {
     proc = try {
       ProcessBuilder(bin)
         .redirectErrorStream(true)
-        .redirectOutput(ProcessBuilder.Redirect.appendTo(log))
+        .redirectOutput(ProcessBuilder.Redirect.to(log))   // truncate: only this ukfsd's output
         .start()
     } catch (e: Exception) {
       Kmsg.log("usb-fs: ukfsd launch failed: ${e.message}")
