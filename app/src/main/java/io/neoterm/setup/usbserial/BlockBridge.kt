@@ -145,6 +145,7 @@ object BlockBridge {
   }
 
   private fun teardown(msg: String) {
+    runCatching { wbFlush() }   // flush any buffered writes while the device is still up
     iface?.let { i -> runCatching { conn?.releaseInterface(i) } }
     runCatching { conn?.close() }
     conn = null; iface = null; epIn = null; epOut = null; deviceName = null; totalBytes = 0
@@ -249,7 +250,7 @@ object BlockBridge {
     return if (done == len) out else null
   }
 
-  private fun writeAt(off: Long, data: ByteArray): Boolean {
+  private fun writeRaw(off: Long, data: ByteArray): Boolean {
     val len = data.size
     if (off < 0 || len <= 0 || off + len > totalBytes) return false
     val first = off / sectorSize
@@ -278,6 +279,36 @@ object BlockBridge {
     return true
   }
 
+  // ── write-back coalescing (turns mkfs/dd's many small sequential writes into a
+  //    few large SCSI WRITE(10)s; flushed on a gap, a 4MB cap, an overlapping read,
+  //    a FLUSH command (guest close/fsync) and detach) ──────────────────────────
+  private var wbStart = -1L
+  private val wbBuf = java.io.ByteArrayOutputStream()
+  private val WB_MAX = 4 * 1024 * 1024
+
+  private fun wbFlush(): Boolean {
+    if (wbStart < 0 || wbBuf.size() == 0) { wbStart = -1; wbBuf.reset(); return true }
+    val data = wbBuf.toByteArray(); val at = wbStart
+    wbBuf.reset(); wbStart = -1
+    return writeRaw(at, data)
+  }
+
+  private fun writeAt(off: Long, data: ByteArray): Boolean {
+    if (off < 0 || data.isEmpty() || off + data.size > totalBytes) return false
+    if (wbStart >= 0 && off != wbStart + wbBuf.size()) { if (!wbFlush()) return false }
+    if (wbStart < 0) wbStart = off
+    wbBuf.write(data)
+    return if (wbBuf.size() >= WB_MAX) wbFlush() else true
+  }
+
+  /** SCSI read with write-back coherency: flush only if the read overlaps the buffer. */
+  private fun readCoherent(off: Long, len: Int): ByteArray? {
+    if (wbStart >= 0 && off < wbStart + wbBuf.size() && off + len > wbStart) {
+      if (!wbFlush()) return null
+    }
+    return readAt(off, len)
+  }
+
   // ── control server ────────────────────────────────────────────────────────
   private fun serve(c: LocalSocket) {
     val inp = c.inputStream; val out = c.outputStream
@@ -290,7 +321,7 @@ object BlockBridge {
           "OPEN", "SIZE" -> reply(out, if (deviceName != null) "OK $totalBytes $sectorSize\n" else "ERR\n")
           "READ" -> {
             val off = p.getOrNull(1)?.toLongOrNull(); val len = p.getOrNull(2)?.toIntOrNull()
-            val data = if (off != null && len != null) readAt(off, len) else null
+            val data = if (off != null && len != null) readCoherent(off, len) else null
             if (data == null) reply(out, "ERR\n")
             else { out.write("OK ${data.size}\n".toByteArray()); out.write(data); out.flush() }
           }
@@ -302,7 +333,7 @@ object BlockBridge {
               reply(out, if (data != null && writeAt(off, data)) "OK\n" else "ERR\n")
             }
           }
-          "FLUSH" -> { runCatching { scsi(byteArrayOf(0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0), null, 0) }; reply(out, "OK\n") }
+          "FLUSH" -> { wbFlush(); runCatching { scsi(byteArrayOf(0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0), null, 0) }; reply(out, "OK\n") }
           else -> reply(out, "ERR\n")
         }
       }
