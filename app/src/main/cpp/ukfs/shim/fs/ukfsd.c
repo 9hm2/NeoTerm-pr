@@ -24,6 +24,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <signal.h>
+#include <sys/prctl.h>
 
 #include "uk_fs_api.h"
 
@@ -298,6 +299,10 @@ static void serve(int cfd)
 int main(int argc, char **argv)
 {
 	const char *sockname = (argc > 1) ? argv[1] : UKFSD_SOCKET_NAME;
+	/* Die when the launching app process dies, so a stale ukfsd can't keep
+	 * holding @io.neoterm.fs across app restarts (which would shadow the new
+	 * build). PR_SET_PDEATHSIG fires when our parent (the app) exits. */
+	prctl(PR_SET_PDEATHSIG, SIGKILL);
 	setenv("UK_FS_DEBUG", "1", 0);   /* TEMP: verbose engine mount logging -> ukfsd.log */
 	setenv("UK_LOGLEVEL", "7", 0);
 	signal(SIGPIPE, SIG_IGN);
