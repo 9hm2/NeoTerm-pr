@@ -157,5 +157,3 @@ matching `libukfs_all.so`'s lazy mount.
   `-Wall -Wextra` against proot-symbol stubs, its getdents synthesis is
   unit-tested, and the patch applies cleanly into `enter.c`/`exit.c`/`seccomp.c`;
   the ptrace half is validated on-device, like the existing block proxy.
-</content>
-</invoke>
