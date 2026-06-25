@@ -48,15 +48,25 @@ foreach(c ${UKFS_FAT_SRC})
     COMPILE_DEFINITIONS "KBUILD_MODNAME=\"vfat_${c}\"")
 endforeach()
 
-add_executable(ukfs_test_vfat
-  ${UKFS_DIR}/shim/fs/ukfs_test.c
+# --- shared FS engine: the vfat driver + VFS/ACL shim + kernel-API shim,
+#     compiled once and linked into both the test harness and the ukfsd server. ---
+add_library(ukfs_engine OBJECT
   ${UKFS_DIR}/shim/fs/vfs.c
   ${UKFS_DIR}/shim/fs/posix_acl.c
   ${UKFS_DIR}/shim/compat_bionic.c   # backtrace/hex/system_wq/get_random_u32 shims
   ${UKFS_OBJ_SRCS}
   ${UKFS_SHIM_CORE})
+target_include_directories(ukfs_engine PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat)
+target_compile_options(ukfs_engine PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
 
-target_include_directories(ukfs_test_vfat PRIVATE
-  ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat)
+# --- ukfsd: io.neoterm.fs unix-socket server (the Android FS daemon) ---
+add_executable(ukfsd ${UKFS_DIR}/shim/fs/ukfsd.c $<TARGET_OBJECTS:ukfs_engine>)
+target_include_directories(ukfsd PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat)
+target_compile_options(ukfsd PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
+target_link_libraries(ukfsd dl)
+
+# --- ukfs_test_vfat: standalone mount/list/read/write harness (dev/debug) ---
+add_executable(ukfs_test_vfat ${UKFS_DIR}/shim/fs/ukfs_test.c $<TARGET_OBJECTS:ukfs_engine>)
+target_include_directories(ukfs_test_vfat PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat)
 target_compile_options(ukfs_test_vfat PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
 target_link_libraries(ukfs_test_vfat dl)
