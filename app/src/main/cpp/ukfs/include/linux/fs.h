@@ -202,9 +202,11 @@ struct block_device {
 	struct address_space	*bd_mapping;
 };
 
+#if !defined(__BIONIC__)   /* bionic's <asm-generic/posix_types.h> already provides it */
 #ifndef _UK_KERNEL_FSID
 #define _UK_KERNEL_FSID
 typedef struct { int val[2]; } __kernel_fsid_t;
+#endif
 #endif
 
 struct mapping_metadata_bhs {

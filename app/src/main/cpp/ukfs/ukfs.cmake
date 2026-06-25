@@ -19,7 +19,11 @@ set(UKFS_INC ${UKFS_DIR}/include)
 set(UKFS_KCFLAGS
   -fPIC -O2 -fno-strict-aliasing -fno-builtin -fshort-wchar -D_GNU_SOURCE
   -D__KERNEL__ -DMODULE
-  -Wno-implicit-function-declaration -Wno-incompatible-pointer-types
+  # clang (NDK) promotes these kernel-isms to hard errors; the original gcc
+  # build left them as warnings. The kernel relies on implicit decls resolving
+  # at link and on loose function-pointer signatures.
+  -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
+  -Wno-incompatible-pointer-types -Wno-incompatible-function-pointer-types
   -Wno-unused -Wno-unused-parameter -Wno-sign-compare
   -Wno-implicit-fallthrough -Wno-missing-braces -Wno-unknown-pragmas)
 
@@ -48,6 +52,7 @@ add_executable(ukfs_test_vfat
   ${UKFS_DIR}/shim/fs/ukfs_test.c
   ${UKFS_DIR}/shim/fs/vfs.c
   ${UKFS_DIR}/shim/fs/posix_acl.c
+  ${UKFS_DIR}/shim/compat_bionic.c   # backtrace/hex/system_wq/get_random_u32 shims
   ${UKFS_OBJ_SRCS}
   ${UKFS_SHIM_CORE})
 
