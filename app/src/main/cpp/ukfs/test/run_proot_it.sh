@@ -201,6 +201,13 @@ echo hello > "$MP/a/b/c/f.txt" || fail "write"
 # listing reflects the new tree
 ls "$MP" | grep -q '^a\$' || fail "ls top"
 ls "$MP/a/b/c" | grep -q '^f.txt\$' || fail "ls nested"
+# O_APPEND to an existing file: the append must land at EOF (not offset 0), and a
+# fresh read must see the grown content (buffer-cache write-through coherence). This
+# is exactly git's .git/config lock+append rewrite pattern.
+printf 'L1\n' > "$MP/a/ap.txt" || fail "append-create"
+printf 'L2\n' >> "$MP/a/ap.txt" || fail "append-write"
+[ "\$(cat "$MP/a/ap.txt" | tr '\\n' ,)" = "L1,L2," ] || fail "append-readback(\$(cat "$MP/a/ap.txt" | tr '\\n' ,))"
+[ "\$(wc -c < "$MP/a/ap.txt")" -eq 6 ] || fail "append-size"
 # rename, then rm -rf the whole tree (fdopendir + fcntl-dup + recursion)
 mv "$MP/a/b/c/f.txt" "$MP/a/b/c/g.txt" || fail "mv"
 [ "\$(cat "$MP/a/b/c/g.txt")" = hello ] || fail "read after mv"

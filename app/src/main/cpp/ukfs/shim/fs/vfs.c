@@ -146,6 +146,17 @@ static int bh_unregister(struct buffer_head *bh)
  * — pl. az inode-tábla — sosem perzisztál). Ezért a getblk-család a meglévőt adja vissza. */
 static struct buffer_head *bh_cache_find(sector_t block, unsigned size)
 { for (struct uk_bhnode *n = g_bhlist; n; n = n->next) if (n->bh->b_blocknr == block && n->bh->b_size == size) return n->bh; return 0; }
+/* Write-through into the shared read buffer cache: the folio write path (write_end)
+ * pushes data straight to the block device with bdev_pwrite, bypassing g_bhlist. The
+ * read path (uk_read -> sb_bread) serves the SAME physical block from g_bhlist, so
+ * without this a file APPEND (write_begin reads the block, writes back the grown
+ * content) leaves the cached buffer stale and `cat` re-reads the pre-append bytes.
+ * Keep the cached buffer in sync whenever a block is written directly. */
+static void bh_cache_store(sector_t block, unsigned size, const void *data)
+{
+	struct buffer_head *bh = bh_cache_find(block, size);
+	if (bh && bh->b_data && data) { memcpy(bh->b_data, data, size); bh->b_state |= (1UL << BH_Uptodate); }
+}
 /* közös release: a regisztrált (cache-elt) buffert NEM szabadítjuk — a cache-ben marad,
  * hogy a következő getblk ugyanazt adja (jbd2-követelmény). Csak visszaírunk + refcount--.
  * A jbd2 journal-temp bh-ja NEM regisztrált — azt a free_buffer_head zárja. */
@@ -686,8 +697,10 @@ int generic_write_end(const struct kiocb *k, struct address_space *m, loff_t pos
 	struct uk_wfolio { struct folio fo; char data[8192]; struct buffer_head bh[16]; int nbh; unsigned bs; struct inode *inode; pgoff_t index; } *w = (void *)f;
 	for (int b = 0; b < w->nbh; b++) {
 		struct buffer_head *bh = &w->bh[b];
-		if (bh->b_blocknr)
+		if (bh->b_blocknr) {
 			bdev_pwrite(bh->b_data, w->bs, (off_t)bh->b_blocknr * w->bs);  /* vissza az image-re */
+			bh_cache_store(bh->b_blocknr, w->bs, bh->b_data);             /* + a read-cache koherens */
+		}
 	}
 	struct inode *inode = m->host;
 	if (pos + copied > inode->i_size) inode->i_size = pos + copied;
@@ -898,8 +911,10 @@ int block_write_end(loff_t pos, unsigned len, unsigned copied, struct folio *fol
 	struct inode *inode = folio->mapping ? folio->mapping->host : 0;
 	struct buffer_head *head = folio->uk_bh, *bh = head;
 	if (bh) do {
-		if (bh->b_blocknr && (bh->b_state & (1UL << BH_Mapped)) && bdev_active())
+		if (bh->b_blocknr && (bh->b_state & (1UL << BH_Mapped)) && bdev_active()) {
 			bdev_pwrite(bh->b_data, bh->b_size, (off_t)bh->b_blocknr * bh->b_size);
+			bh_cache_store(bh->b_blocknr, bh->b_size, bh->b_data);   /* read-cache koherens */
+		}
 		bh = bh->b_this_page;
 	} while (bh && bh != head);
 	if (inode && pos + (loff_t)copied > inode->i_size) inode->i_size = pos + copied;

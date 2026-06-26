@@ -386,13 +386,14 @@ static int ukfs_tgid(int tid)
 struct ukfs_dent { unsigned long long ino; int type; char name[256]; };
 struct ukfs_vfd {
 	int used, pid, fd, isdir, wrote;   /* wrote: needs a SYNC on close (deferred flush) */
+	int append;                     /* O_APPEND: each write goes to EOF (offset re-evaluated) */
 	long long off;                  /* regular-file read cursor */
 	char path[PATH_MAX];            /* vmount-relative */
 	char backing[64];               /* per-fd placeholder guest path (for mmap populate/cleanup) */
 	struct ukfs_dent *dents;        /* dir: parsed LIST incl. "." and ".." */
 	int dent_n, dent_idx;           /* count and emit cursor */
 };
-struct ukfs_pending { int used, pid, isdir; char path[PATH_MAX]; char backing[64]; };
+struct ukfs_pending { int used, pid, isdir, append; char path[PATH_MAX]; char backing[64]; };
 static struct ukfs_vfd     g_vfd[128];
 static struct ukfs_pending g_open_pending[64];
 static int                 g_ph_seq;   /* unique per-open placeholder id */
@@ -438,13 +439,14 @@ static int pend_res_take(int pid, word_t nr, long *res)
 	return 0;
 }
 
-static void open_pending_set(int pid, int isdir, const char *path, const char *backing)
+static void open_pending_set(int pid, int isdir, int append, const char *path, const char *backing)
 {
 	int i;
 	for (i = 0; i < 64; i++) if (g_open_pending[i].used && g_open_pending[i].pid == pid) break;
 	if (i == 64) for (i = 0; i < 64; i++) if (!g_open_pending[i].used) break;
 	if (i == 64) return;
 	g_open_pending[i].used = 1; g_open_pending[i].pid = pid; g_open_pending[i].isdir = isdir;
+	g_open_pending[i].append = append;
 	snprintf(g_open_pending[i].path, sizeof g_open_pending[i].path, "%s", path);
 	snprintf(g_open_pending[i].backing, sizeof g_open_pending[i].backing, "%s", backing ? backing : "");
 }
@@ -668,7 +670,7 @@ static int ukfs_open_redirect(Tracee *tracee, const char *rel, int flags)
 		snprintf(backing, sizeof backing, "/.ukfs_ph_%d_%d", tracee->pid, ++g_ph_seq);
 		(void) set_sysarg_path(tracee, backing, SYSARG_2);
 	}
-	open_pending_set(tracee->pid, isdir, rel, backing);
+	open_pending_set(tracee->pid, isdir, (flags & O_APPEND) ? 1 : 0, rel, backing);
 	if (!strstr(rel, ".so") && !strstr(rel, "/lib")) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: OPEN rel='%s' flags=0x%x q=%d isdir=%d\n", rel, (unsigned) flags, q, isdir); uk_dbg_line(l); }
 	return isdir ? 2 : 0;
 }
@@ -734,7 +736,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v42-create-enoent UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v43-append-relaccess UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -872,6 +874,15 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (!v || v->isdir) return false;
 		long long pos = (nr == PR_pwrite64)
 			? (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_4) : v->off;
+		/* O_APPEND (PR_write only; pwrite64 ignores O_APPEND per POSIX): each write
+		 * atomically goes to the CURRENT end of file. The vfd cursor starts at 0 and
+		 * isn't advanced by other writers, so without this an append clobbers byte 0
+		 * (e.g. git rewriting .git/config via lock+append). Re-query the live size. */
+		if (nr == PR_write && v->append) {
+			unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
+			if (ukfs_query_stat(v->path, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks) == 0)
+				pos = (long long) size;
+		}
 		size_t len = (size_t) peek_reg(tracee, CURRENT, SYSARG_3);
 		word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
 		if (len == 0) { poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true; }
@@ -884,7 +895,9 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		free(tmp);
 		if (strstr(v->path, "config")) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: WRITE poke=%ld off=%lld len=%zu p='%s'\n", n, pos, len, v->path); uk_dbg_line(l); }
 		if (n < 0) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EIO); set_sysnum(tracee, PR_void); return true; }
-		if (nr == PR_write) v->off += n;
+		/* advance the cursor: for O_APPEND to the post-write EOF (pos was the live size),
+		 * otherwise from the previous cursor. pwrite64 never moves the cursor. */
+		if (nr == PR_write) v->off = (v->append ? pos : v->off) + n;
 		v->wrote = 1;          /* defer the block-device flush to close (SYNC) */
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) n); set_sysnum(tracee, PR_void); return true;
 	}
@@ -1042,14 +1055,14 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (nr == PR_getxattr || nr == PR_lgetxattr) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
-		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;  /* legacy path arg: CWD-relative */
 		pend_res_set(tracee->pid, nr, -ENOTSUP);
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOTSUP); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_listxattr || nr == PR_llistxattr) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
-		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;  /* legacy path arg: CWD-relative */
 		pend_res_set(tracee->pid, nr, 0);
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;   /* no xattrs */
 	}
@@ -1059,7 +1072,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (nr == PR_setxattr || nr == PR_lsetxattr || nr == PR_removexattr || nr == PR_lremovexattr) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
-		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;  /* legacy path arg: CWD-relative */
 		pend_res_set(tracee->pid, nr, 0);
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
@@ -1090,8 +1103,12 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		word_t pa = peek_reg(tracee, CURRENT, isaccess ? SYSARG_1 : SYSARG_2);
 		char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
-		if (!(isaccess ? ukfs_rel(gp, rel, sizeof rel)
-		               : ukfs_rel_at(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1), gp, rel, sizeof rel)))
+		/* legacy access(2) takes a CWD-relative path (dirfd = AT_FDCWD); resolving it
+		 * with ukfs_rel (absolute-only) misses relative probes like git's
+		 * access(".git/config", R_OK), which then fall through to the host, return
+		 * ENOENT, and make git silently skip the repo's local config. */
+		int dfd = isaccess ? AT_FDCWD : (int) peek_reg(tracee, CURRENT, SYSARG_1);
+		if (!ukfs_rel_at(tracee, dfd, gp, rel, sizeof rel))
 			return false;
 		unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
 		int q = ukfs_query_stat(rel, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks);
@@ -1192,7 +1209,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (nr == PR_truncate) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
-		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;  /* legacy path arg: CWD-relative */
 		long long sz = (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_2);
 		char pfx[48]; snprintf(pfx, sizeof pfx, "TRUNCATE %lld ", sz);
 		long r = ukfs_simple(pfx, rel);
@@ -1336,7 +1353,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (nr == PR_readlink) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
-		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;  /* legacy path arg: CWD-relative */
 		char tgt[PATH_MAX]; long n = ukfs_readlink_at(rel, tgt, sizeof tgt);
 		if (n < 0) {
 			unsigned m2, u2, g2, nl2; long sz2, mt2, at2; unsigned long i2, rd2, bl2;
@@ -1475,7 +1492,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 		if (v) {
 			memset(v, 0, sizeof *v);
 			v->used = 1; v->pid = pid; v->fd = (int) newfd;
-			v->isdir = src->isdir; v->off = src->off;
+			v->isdir = src->isdir; v->off = src->off; v->append = src->append;
 			snprintf(v->path, sizeof v->path, "%s", src->path);
 		}
 		return;
@@ -1501,7 +1518,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 		if (v) {
 			memset(v, 0, sizeof *v);
 			v->used = 1; v->pid = pid; v->fd = (int) newfd;
-			v->isdir = src->isdir; v->off = src->off;
+			v->isdir = src->isdir; v->off = src->off; v->append = src->append;
 			snprintf(v->path, sizeof v->path, "%s", src->path);
 		}
 		return;
@@ -1520,6 +1537,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 		if (v) {
 			memset(v, 0, sizeof *v);
 			v->used = 1; v->pid = pid; v->fd = (int) fd; v->isdir = pp->isdir; v->off = 0;
+			v->append = pp->append;
 			snprintf(v->path, sizeof v->path, "%s", pp->path);
 			snprintf(v->backing, sizeof v->backing, "%s", pp->backing);
 			if (pp->isdir) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: vfd+DIR fd=%ld path='%s' tgid=%d\n", fd, pp->path, pid); uk_dbg_line(l); }
