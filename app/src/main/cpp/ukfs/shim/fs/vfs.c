@@ -712,7 +712,35 @@ int  block_write_full_folio(struct folio *f, struct writeback_control *w, void *
 bool block_dirty_folio(struct address_space *m, struct folio *f) { (void)m;(void)f; return true; }
 void block_invalidate_folio(struct folio *f, size_t o, size_t l) { (void)f;(void)o;(void)l; }
 int  block_truncate_page(struct address_space *m, loff_t from, get_block_t *gb) { (void)m;(void)from;(void)gb; return 0; }
-int  generic_cont_expand_simple(struct inode *i, loff_t size) { (void)i;(void)size; return 0; }
+/* generic_cont_expand_simple: grow a file to `size`, zero-filling the new tail.
+ * FAT's fat_cont_expand (truncate(2)-to-grow / fallocate) relies on this; the old
+ * no-op stub made `truncate -s N` on a smaller file silently keep the old size.
+ * FAT has no sparse files, so we materialise real zero blocks via the driver's
+ * write_begin/write_end (which allocate clusters, push to the device, and bump
+ * i_size + the read-cache, exactly like a normal write). */
+int  generic_cont_expand_simple(struct inode *inode, loff_t size)
+{
+	if (!inode || size <= inode->i_size) return 0;
+	struct address_space *m = inode->i_mapping;
+	if (!m || !m->a_ops || !m->a_ops->write_begin || !m->a_ops->write_end) {
+		inode->i_size = size; return 0;       /* no block path: at least record the size */
+	}
+	static const char zeros[4096];
+	loff_t pos = inode->i_size;
+	while (pos < size) {
+		unsigned within = (unsigned)(pos & 4095);
+		unsigned chunk = 4096 - within;
+		if ((loff_t)chunk > size - pos) chunk = (unsigned)(size - pos);
+		struct folio *fo = 0; void *fsdata = 0;
+		int e = m->a_ops->write_begin(0, m, pos, chunk, &fo, &fsdata);
+		if (e || !fo) return e ? e : -5;
+		memcpy((char *)folio_address(fo) + within, zeros, chunk);
+		m->a_ops->write_end(0, m, pos, chunk, chunk, fo, fsdata);
+		pos += chunk;
+	}
+	if (inode->i_size < size) inode->i_size = size;
+	return 0;
+}
 int  buffer_migrate_folio(struct address_space *m, struct folio *d, struct folio *s, int mode) { (void)m;(void)d;(void)s;(void)mode; return 0; }
 
 /* metadata-bh (mmb_*) — stub */
@@ -1094,50 +1122,46 @@ static char g_leafbuf[256];
 static struct dentry *api_walk(const char *path, struct inode **parent, struct dentry **pdentry, const char **leafname)
 {
 	if (!g_api_root || !path) return 0;
-	struct dentry *cur = g_api_root;
+	/* Canonicalise "."/".." LEXICALLY before walking. We must NOT resolve ".." via
+	 * dentry->d_parent: the FAT driver's lookup returns CACHED/aliased dentries
+	 * (d_splice_alias), whose d_parent is stale or NULL, so a relied-on parent chain
+	 * gives wrong results — e.g. fts (rm -rf) opening "/a/b/c/.." then stat'ing
+	 * "/a/b/c/../.." resolved to ENOENT and aborted the recursion. Collapsing the
+	 * path to a clean component stack first means the walk only does forward
+	 * directory lookups, which are always correct. ".." past the mount root clamps. */
 	char buf[1024]; strncpy(buf, path, sizeof(buf)-1); buf[sizeof(buf)-1] = 0;
-	char *save = 0, *comp = strtok_r(buf, "/", &save);
-	if (!comp) return 0;
-	while (comp) {
-		char *next = strtok_r(0, "/", &save);
-		/* "." -> current dir; ".." -> parent (clamped at the mount root). Resolve
-		 * these logically rather than via a driver lookup: a FAT *root* directory
-		 * has no on-disk "."/".." entries, so STAT/open of "/." or "/.." would
-		 * spuriously fail (and ls would then show the mount root with host attrs). */
-		if (strcmp(comp, ".") == 0 || strcmp(comp, "..") == 0) {
-			struct dentry *tgt = (comp[1] == '.')
-				? (cur->d_parent ? cur->d_parent : cur)   /* ".." */
-				: cur;                                     /* "."  */
-			if (!next) {                       /* ez a LEVÉL */
-				struct dentry *pd = tgt->d_parent ? tgt->d_parent : tgt;
-				strncpy(g_leafbuf, comp, sizeof(g_leafbuf)-1); g_leafbuf[sizeof(g_leafbuf)-1]=0;
-				if (parent) *parent = pd->d_inode;
-				if (pdentry) *pdentry = pd;
-				if (leafname) *leafname = g_leafbuf;
-				return tgt;
-			}
-			cur = tgt; comp = next; continue;
-		}
-		if (!next) {                       /* ez a LEVÉL */
-			strncpy(g_leafbuf, comp, sizeof(g_leafbuf)-1); g_leafbuf[sizeof(g_leafbuf)-1]=0;
-			if (parent) *parent = cur->d_inode;
-			if (pdentry) *pdentry = cur;
-			if (leafname) *leafname = g_leafbuf;
-			return lookup_one(cur->d_inode, cur, comp);
-		}
-		/* köztes komponens: le kell tudni lépni (könyvtár) */
-		struct dentry *d = lookup_one(cur->d_inode, cur, comp);
+	char *comps[128]; int nc = 0;
+	char *save = 0;
+	for (char *tok = strtok_r(buf, "/", &save); tok; tok = strtok_r(0, "/", &save)) {
+		if (!strcmp(tok, ".")) continue;
+		if (!strcmp(tok, "..")) { if (nc > 0) nc--; continue; }
+		if (nc < 128) comps[nc++] = tok;
+	}
+	/* Empty stack => the path resolves to the mount root itself ("/", "/.", "/a/.."). */
+	if (nc == 0) {
+		strncpy(g_leafbuf, ".", sizeof(g_leafbuf)-1); g_leafbuf[sizeof(g_leafbuf)-1]=0;
+		if (parent) *parent = g_api_root->d_inode;
+		if (pdentry) *pdentry = g_api_root;
+		if (leafname) *leafname = g_leafbuf;
+		return g_api_root;
+	}
+	struct dentry *cur = g_api_root;
+	for (int i = 0; i < nc - 1; i++) {            /* köztes komponensek: mind könyvtár kell legyen */
+		struct dentry *d = lookup_one(cur->d_inode, cur, comps[i]);
 		if (!d || !d->d_inode || (d->d_inode->i_mode & 0170000) != 0040000) {
 			fprintf(stderr, "ukfsd: api_walk FAIL comp='%s' path='%s' d=%p inode=%p mode=%o\n",
-			        comp, path, (void*)d, d ? (void*)d->d_inode : 0,
+			        comps[i], path, (void*)d, d ? (void*)d->d_inode : 0,
 			        (d && d->d_inode) ? (unsigned)d->d_inode->i_mode : 0u);
 			fflush(stderr);
 			return 0;
 		}
 		cur = d;
-		comp = next;
 	}
-	return 0;
+	strncpy(g_leafbuf, comps[nc-1], sizeof(g_leafbuf)-1); g_leafbuf[sizeof(g_leafbuf)-1]=0;
+	if (parent) *parent = cur->d_inode;
+	if (pdentry) *pdentry = cur;
+	if (leafname) *leafname = g_leafbuf;
+	return lookup_one(cur->d_inode, cur, comps[nc-1]);
 }
 
 static struct dentry *api_lookup(const char *name)

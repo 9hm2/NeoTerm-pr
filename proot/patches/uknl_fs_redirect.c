@@ -629,7 +629,9 @@ static int ukfs_rel_at(Tracee *tracee, int dirfd, const char *path, char *rel, s
  * The file placeholder is a REAL regular file (/.ukfs_ph), not /dev/null, so that
  * fd-based metadata ops the guest does on it (utimensat/fchmod/fsetxattr/ioctl)
  * succeed instead of EPERMing on the root-owned /dev/null device. */
-static int ukfs_open_redirect(Tracee *tracee, const char *rel, int flags)
+/* @patharg is the register holding the path to rewrite to the placeholder:
+ * SYSARG_2 for openat/openat2, SYSARG_1 for the legacy creat(2). */
+static int ukfs_open_redirect_arg(Tracee *tracee, const char *rel, int flags, Reg patharg)
 {
 	unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
 	int q = ukfs_query_stat(rel, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks);
@@ -665,15 +667,18 @@ static int ukfs_open_redirect(Tracee *tracee, const char *rel, int flags)
 	 * and unlinked right after open (anonymous; freed on close, no clutter). */
 	char backing[64]; backing[0] = 0;
 	if (isdir) {
-		(void) set_sysarg_path(tracee, "/", SYSARG_2);
+		(void) set_sysarg_path(tracee, "/", patharg);
 	} else {
 		snprintf(backing, sizeof backing, "/.ukfs_ph_%d_%d", tracee->pid, ++g_ph_seq);
-		(void) set_sysarg_path(tracee, backing, SYSARG_2);
+		(void) set_sysarg_path(tracee, backing, patharg);
 	}
 	open_pending_set(tracee->pid, isdir, (flags & O_APPEND) ? 1 : 0, rel, backing);
 	if (!strstr(rel, ".so") && !strstr(rel, "/lib")) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: OPEN rel='%s' flags=0x%x q=%d isdir=%d\n", rel, (unsigned) flags, q, isdir); uk_dbg_line(l); }
 	return isdir ? 2 : 0;
 }
+/* openat/openat2 path lives in SYSARG_2 — the common case. */
+static int ukfs_open_redirect(Tracee *tracee, const char *rel, int flags)
+{ return ukfs_open_redirect_arg(tracee, rel, flags, SYSARG_2); }
 
 /* mmap(2) on a vfd maps the placeholder inode's real pages, NOT the intercepted
  * read() data — so an empty placeholder SIGBUSes the moment the tracee touches
@@ -736,7 +741,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v43-append-relaccess UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v44-walk-trunc-creat UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -1185,7 +1190,12 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		pend_res_set(tracee->pid, nr, r);
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
-	if (nr == PR_fchmodat) {
+	/* fchmodat(dirfd, path, mode, flags) AND fchmodat2(dirfd, path, mode, flags):
+	 * identical arg layout for our purposes (we ignore AT_SYMLINK_NOFOLLOW — FAT has
+	 * no symlinks). glibc routes fchmodat(...,AT_SYMLINK_NOFOLLOW) through the newer
+	 * fchmodat2 syscall, which tar/cp -p/rsync use to restore directory modes; proot
+	 * is taught fchmodat2 (sysnum 452) by the patch script so it traps here too. */
+	if (nr == PR_fchmodat || nr == PR_fchmodat2) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
 		if (!ukfs_rel_at(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1), gp, rel, sizeof rel)) return false;
@@ -1292,6 +1302,19 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	 * handling them makes the redirect portable and lets the host integration test
 	 * exercise the real stack. Each delegates to the same ukfsd op as its *at twin
 	 * with AT_FDCWD. ---- */
+	/* legacy creat(path, mode) == openat(AT_FDCWD, path, O_WRONLY|O_CREAT|O_TRUNC,
+	 * mode). The path is in SYSARG_1 (mode in SYSARG_2), so the placeholder rewrite
+	 * targets SYSARG_1 and the unmodified SYSARG_2 mode stays. Used by tar/cpio and
+	 * other tools to create output files; without it the archive lands on the host
+	 * shadow and never appears in the mount. */
+	if (nr == PR_creat) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;
+		int r = ukfs_open_redirect_arg(tracee, rel, O_WRONLY | O_CREAT | O_TRUNC, SYSARG_1);
+		if (r == 2) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EISDIR); set_sysnum(tracee, PR_void); return true; }
+		return r == 1;   /* r==0: host creats the placeholder -> real writable fd, vfd set up at exit */
+	}
 	if (nr == PR_mkdir) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
@@ -1524,7 +1547,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 		return;
 	}
 
-	if (nr != PR_openat && nr != PR_openat2) return;
+	if (nr != PR_openat && nr != PR_openat2 && nr != PR_creat) return;
 	struct ukfs_pending *pp = NULL;
 	for (int i = 0; i < 64; i++)
 		if (g_open_pending[i].used && g_open_pending[i].pid == tid) { pp = &g_open_pending[i]; break; }

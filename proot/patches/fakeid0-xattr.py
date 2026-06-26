@@ -979,6 +979,8 @@ if 'uk_fs_sysnums' not in s:
                   '\t\tstatic const FilteredSysnum uk_fs_sysnums[] = {\n'
                   '\t\t\t{ PR_openat,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_openat2,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_creat,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_fchmodat2,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_read,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_pread64,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_lseek,\tFILTER_SYSEXIT },\n'
@@ -1070,5 +1072,26 @@ if 'NeoTerm: keep the per-process "self"' not in s:
                   '\tstatus = realpath2(tracee->reconf.tracee, binding->host.path, host, true);\n'
                   '\tif (status < 0) {\n', 1)
     wr(PB, s)
+
+# ---- teach proot the fchmodat2(2) syscall (sysnum 452, arch-agnostic on the ABIs
+#      we target). glibc routes fchmodat(...,AT_SYMLINK_NOFOLLOW) through it, so
+#      tar/cp -p/rsync use it to restore directory modes; without a PR_ mapping proot
+#      runs it natively against the host shadow (-> ENOENT under a vmount). Append the
+#      abstract sysnum and wire it into each arch's raw->PR_ table so it traps and the
+#      redirect's PR_fchmodat2 handler runs. ----
+SNL = ROOT + "/syscall/sysnums.list"; s = rd(SNL)
+if 'SYSNUM(fchmodat2)' not in s:
+    if not s.endswith('\n'): s += '\n'
+    s += 'SYSNUM(fchmodat2)\n'
+    wr(SNL, s)
+for arch, num in (("x86_64", 452), ("arm64", 452), ("arm", 452), ("i386", 452), ("x32", 452), ("sh4", 452)):
+    AH = ROOT + "/syscall/sysnums-%s.h" % arch
+    try: s = rd(AH)
+    except FileNotFoundError: continue
+    if 'PR_fchmodat2' in s: continue
+    anchor = '[ %d ] = PR_fchmodat,' % {"x86_64":268,"arm64":53,"arm":333,"i386":306,"x32":268,"sh4":306}[arch]
+    if anchor in s:
+        s = s.replace(anchor, anchor + '\n\t[ %d ] = PR_fchmodat2,' % num, 1)
+        wr(AH, s)
 
 print("ALL PATCHES APPLIED OK")
