@@ -42,7 +42,7 @@ enum { PR_void = 0, PR_mount, PR_newfstatat, PR_fstatat64, PR_statx,
        PR_mkdir, PR_rmdir, PR_unlink, PR_rename, PR_chmod, PR_chown, PR_lchown,
        PR_stat, PR_lstat, PR_stat64, PR_lstat64, PR_readlink, PR_symlink, PR_open, PR_creat,
        PR_getcwd, PR_fchmodat2, PR_copy_file_range, PR_sendfile, PR_sendfile64,
-       PR_execve, PR_execveat };
+       PR_execve, PR_execveat, PR_msync };
 #ifndef EXDEV
 #define EXDEV 18
 #endif

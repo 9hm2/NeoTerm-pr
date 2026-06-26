@@ -400,6 +400,7 @@ struct ukfs_dent { unsigned long long ino; int type; char name[256]; };
 struct ukfs_vfd {
 	int used, pid, fd, isdir, wrote;   /* wrote: needs a SYNC on close (deferred flush) */
 	int append;                     /* O_APPEND: each write goes to EOF (offset re-evaluated) */
+	int mmapw;                      /* has a PROT_WRITE|MAP_SHARED mapping -> flush placeholder back */
 	long long off;                  /* regular-file read cursor */
 	char path[PATH_MAX];            /* vmount-relative */
 	char backing[64];               /* per-fd placeholder guest path (for mmap populate/cleanup) */
@@ -770,6 +771,31 @@ static void ukfs_populate_fd(Tracee *tracee, int fd, const char *relpath)
 	{ char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: mmap populate fd=%d bytes=%lld p='%s'\n", fd, off, relpath); uk_dbg_line(l); }
 }
 
+/* Writeback for a PROT_WRITE|MAP_SHARED mapping: the guest wrote into the
+ * placeholder inode via the mapping (databases, mmap-based editors); read it back
+ * through /proc/<pid>/fd/<fd> and push it to ukfs. Called on msync/close — by which
+ * point msync/munmap has flushed the dirty pages to the placeholder inode. */
+static void ukfs_flush_mmap(Tracee *tracee, struct ukfs_vfd *v, int fd)
+{
+	char proc[64]; snprintf(proc, sizeof proc, "/proc/%d/fd/%d", tracee->pid, fd);
+	int bfd = open(proc, O_RDONLY | O_CLOEXEC);
+	if (bfd < 0) return;
+	off_t end = lseek(bfd, 0, SEEK_END);
+	char *buf = malloc(65536);
+	long long off = 0;
+	if (buf && end > 0) {
+		while (off < (long long) end) {
+			ssize_t n = pread(bfd, buf, 65536, (off_t) off);
+			if (n <= 0) break;
+			if (ukfs_write_at(v->path, off, buf, (size_t) n) < 0) break;
+			off += n;
+		}
+		v->wrote = 1;            /* ensure the deferred SYNC fires */
+	}
+	free(buf);
+	close(bfd);
+}
+
 /* Lexical path canonicalisation: collapse "." and ".." and redundant slashes
  * (no symlink following — the guest paths here are already vmount-logical). Used
  * to turn a chdir target into a clean absolute guest path for the cwd. */
@@ -800,7 +826,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v45-fork-exec-cfr UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v46-mmap-writeback UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -951,7 +977,20 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		struct ukfs_vfd *v = (fd >= 0) ? vfd_lookup(tracee, fd) : NULL;
 		if (!v || v->isdir) return false;
 		ukfs_populate_fd(tracee, fd, v->path);
+		unsigned prot = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3);
+		unsigned flags = (unsigned) peek_reg(tracee, CURRENT, SYSARG_4);
+		if ((prot & 0x2 /*PROT_WRITE*/) && (flags & 0x1 /*MAP_SHARED*/)) v->mmapw = 1;
 		return false;     /* native mmap now maps real bytes */
+	}
+	/* msync(addr,len,flags): can't map the address back to a vfd, so flush EVERY
+	 * writable-shared mapping in this thread group — the mmap-write data is otherwise
+	 * stranded in the placeholder inode (databases call msync without closing). */
+	if (nr == PR_msync) {
+		int tg = ukfs_tgid(tracee->pid), any = 0;
+		for (int i = 0; i < 128; i++)
+			if (g_vfd[i].used && g_vfd[i].pid == tg && g_vfd[i].mmapw) { ukfs_flush_mmap(tracee, &g_vfd[i], g_vfd[i].fd); any = 1; }
+		if (!any) return false;          /* nothing of ours mapped: let the native msync run */
+		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
 
 	/* fd-based ops on a vfd (set up by a prior openat). */
@@ -1068,8 +1107,11 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		poke_reg(tracee, SYSARG_RESULT, (word_t) w); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_close) {
-		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		int cfd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+		struct ukfs_vfd *v = vfd_lookup(tracee, cfd);
 		if (v) {
+			/* push any mmap-written content back to ukfs before the placeholder dies */
+			if (v->mmapw) ukfs_flush_mmap(tracee, v, cfd);
 			/* Flush deferred writes once, here, instead of per write() — the latter
 			 * is O(n^2) (each sync rewrites the whole dirty-buffer list). */
 			if (v->wrote) {

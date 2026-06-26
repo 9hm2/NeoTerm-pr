@@ -1002,6 +1002,7 @@ if 'uk_fs_sysnums' not in s:
                   '\t\t\t{ PR_fchown,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_mmap,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_mmap2,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_msync,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_fcntl,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_fcntl64,\tFILTER_SYSEXIT },\n'
                   '\t\t\tFILTERED_SYSNUM_END,\n'
