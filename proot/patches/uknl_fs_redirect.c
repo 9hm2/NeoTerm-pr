@@ -474,7 +474,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v9-dupfix UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v10-dupfree UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -789,6 +789,11 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if ((flags & O_DIRECTORY) && !isdir) {
 			poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOTDIR); set_sysnum(tracee, PR_void); return true;
 		}
+		/* O_TRUNC on an existing regular file: truncate the ukfs file now (the
+		 * /dev/null placeholder open won't), else `echo > existing` leaves stale
+		 * tail bytes past the freshly written content. q==0 => the file existed. */
+		if (!isdir && q == 0 && (flags & O_TRUNC))
+			(void) ukfs_simple("TRUNCATE 0 ", rel);
 		(void) set_sysarg_path(tracee, isdir ? "/" : "/dev/null", SYSARG_2);
 		open_pending_set(tracee->pid, isdir, rel);
 		return false;          /* let the rewritten open proceed; fd captured at exit */
@@ -811,14 +816,22 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 	 * data vanishes (the file stays empty). On aarch64 dup2 is implemented via
 	 * dup3, so both are handled. */
 	if (nr == PR_dup || nr == PR_dup2 || nr == PR_dup3) {
+		long newfd = (long)(int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+		if (newfd < 0) return;                       /* dup failed: nothing changed */
 		/* At sysEXIT the arg registers are clobbered (on aarch64 x0 holds the
 		 * return value), so read oldfd from the ORIGINAL (entry) snapshot. */
-		struct ukfs_vfd *src = vfd_find(pid, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
-		if (!src) return;
-		long newfd = (long)(int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
-		if (newfd < 0 || (int) newfd == src->fd) return;
-		struct ukfs_vfd *old = vfd_find(pid, (int) newfd);   /* dup2/3 closed it first */
+		int oldfd = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
+		if ((int) newfd == oldfd) return;            /* dup2(fd,fd): no-op */
+		/* dup2/dup3 REDEFINE newfd, so any vfd previously on that fd number is now
+		 * stale and MUST be dropped — e.g. the shell restoring stdout with
+		 * dup2(saved_tty_fd, 1) after `echo > file`: without this, vfd[1] keeps
+		 * pointing at the file and every later write to fd 1 (the prompt, all
+		 * command output) is redirected into the file (terminal "freezes"). */
+		struct ukfs_vfd *old = vfd_find(pid, (int) newfd);
 		if (old) vfd_free(old);
+		/* If the source is one of our vfds, the new fd aliases the same path. */
+		struct ukfs_vfd *src = vfd_find(pid, oldfd);
+		if (!src) return;
 		struct ukfs_vfd *v = vfd_alloc();
 		if (v) {
 			memset(v, 0, sizeof *v);
