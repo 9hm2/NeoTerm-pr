@@ -964,6 +964,7 @@ if 'uk_fs_sysnums' not in s:
                   '\tif (status >= 0 && getenv("UK_FS")) {\n'
                   '\t\tstatic const FilteredSysnum uk_fs_sysnums[] = {\n'
                   '\t\t\t{ PR_openat,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_openat2,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_read,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_pread64,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_lseek,\tFILTER_SYSEXIT },\n'
@@ -1023,5 +1024,29 @@ if 'NeoTerm: normalize "/proc/self"' not in s:
                   '\t\t}\n'
                   '\t}\n', 1)
     wr(PC, s)
+
+# ---- path/binding.c: don't canonicalize "/proc/self" + "/proc/thread-self" host
+#      binding targets. new_binding() runs realpath2() on the host path at startup,
+#      which resolves "self" to PRoot's OWN pid — pinning -b /proc/self/fd:/dev/fd
+#      (and /dev/std{in,out,err}) to PRoot's fds. The guest's /dev/fd/N then maps to
+#      PRoot fd N -> ENOENT, breaking shell process substitution. Store the path
+#      verbatim so "self" stays per-process and resolves to the tracee. ----
+PB = ROOT + "/path/binding.c"; s = rd(PB)
+if 'NeoTerm: keep the per-process "self"' not in s:
+    bind_anchor = ('\tstatus = realpath2(tracee->reconf.tracee, binding->host.path, host, true);\n'
+                   '\tif (status < 0) {\n')
+    must(bind_anchor in s, "binding.c new_binding realpath2 anchor")
+    s = s.replace(bind_anchor,
+                  '\tif (strncmp(host, "/proc/self/", 11) == 0 || strncmp(host, "/proc/thread-self/", 18) == 0) {\n'
+                  '\t\t/* NeoTerm: keep the per-process "self" magic; realpath2 would resolve it\n'
+                  '\t\t * to PRoot\'s OWN pid, pinning -b /proc/self/fd:/dev/fd (and the std* binds)\n'
+                  '\t\t * to PRoot\'s fds. Store verbatim so the tracee resolves "self" to itself;\n'
+                  '\t\t * readlink_proc maps it to the tracee pid during canonicalization. */\n'
+                  '\t\tif (strlen(host) >= PATH_MAX) status = -ENAMETOOLONG;\n'
+                  '\t\telse { strcpy(binding->host.path, host); status = 0; }\n'
+                  '\t} else\n'
+                  '\tstatus = realpath2(tracee->reconf.tracee, binding->host.path, host, true);\n'
+                  '\tif (status < 0) {\n', 1)
+    wr(PB, s)
 
 print("ALL PATCHES APPLIED OK")

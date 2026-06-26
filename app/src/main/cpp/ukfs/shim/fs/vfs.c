@@ -1037,6 +1037,24 @@ static struct dentry *api_walk(const char *path, struct inode **parent, struct d
 	if (!comp) return 0;
 	while (comp) {
 		char *next = strtok_r(0, "/", &save);
+		/* "." -> current dir; ".." -> parent (clamped at the mount root). Resolve
+		 * these logically rather than via a driver lookup: a FAT *root* directory
+		 * has no on-disk "."/".." entries, so STAT/open of "/." or "/.." would
+		 * spuriously fail (and ls would then show the mount root with host attrs). */
+		if (strcmp(comp, ".") == 0 || strcmp(comp, "..") == 0) {
+			struct dentry *tgt = (comp[1] == '.')
+				? (cur->d_parent ? cur->d_parent : cur)   /* ".." */
+				: cur;                                     /* "."  */
+			if (!next) {                       /* ez a LEVÉL */
+				struct dentry *pd = tgt->d_parent ? tgt->d_parent : tgt;
+				strncpy(g_leafbuf, comp, sizeof(g_leafbuf)-1); g_leafbuf[sizeof(g_leafbuf)-1]=0;
+				if (parent) *parent = pd->d_inode;
+				if (pdentry) *pdentry = pd;
+				if (leafname) *leafname = g_leafbuf;
+				return tgt;
+			}
+			cur = tgt; comp = next; continue;
+		}
 		if (!next) {                       /* ez a LEVÉL */
 			strncpy(g_leafbuf, comp, sizeof(g_leafbuf)-1); g_leafbuf[sizeof(g_leafbuf)-1]=0;
 			if (parent) *parent = cur->d_inode;

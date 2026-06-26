@@ -465,6 +465,39 @@ static bool uknl_fs_umount_hook(Tracee *tracee)
 	return true;
 }
 
+/* Shared openat/openat2 redirect for a vmount-relative path @rel with open
+ * @flags. Returns 1 if fully handled (SYSARG_RESULT poked + PR_void), 0 if it
+ * rewrote the path to a placeholder so the real open proceeds (fd bound at exit),
+ * -1 to not intercept (socket down -> let the host try). */
+static int ukfs_open_redirect(Tracee *tracee, const char *rel, int flags)
+{
+	unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
+	int q = ukfs_query_stat(rel, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks);
+	if (q == -1) return -1;
+	int isdir = (q == 0) && ((mode & 0170000) == 0040000);   /* S_IFDIR */
+	if (q == -2) {
+		if (flags & O_CREAT) {
+			if (ukfs_create_at(rel, 0100644) < 0) {
+				poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EIO); set_sysnum(tracee, PR_void); return 1;
+			}
+			isdir = 0;
+		} else {
+			poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOENT); set_sysnum(tracee, PR_void); return 1;
+		}
+	}
+	if ((flags & O_DIRECTORY) && !isdir) {
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOTDIR); set_sysnum(tracee, PR_void); return 1;
+	}
+	/* O_TRUNC on an existing regular file: truncate the ukfs file now (the
+	 * /dev/null placeholder open won't), else `echo > existing` leaves stale
+	 * tail bytes past the freshly written content. q==0 => the file existed. */
+	if (!isdir && q == 0 && (flags & O_TRUNC))
+		(void) ukfs_simple("TRUNCATE 0 ", rel);
+	(void) set_sysarg_path(tracee, isdir ? "/" : "/dev/null", SYSARG_2);
+	open_pending_set(tracee->pid, isdir, rel);
+	return 0;
+}
+
 static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 {
 	/* --- TEMP DEBUG v3: one-time INIT line at the first syscall (shows the raw
@@ -474,7 +507,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v10-dupfree UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v11-openat2 UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -678,6 +711,23 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;   /* no xattrs */
 	}
 
+	/* access(2) family under the vmount. access() checks the REAL uid, which under
+	 * proot -0 is the (non-root) app uid, so a host-translated check on a file the
+	 * FS engine owns as root:0644 would deny write -> e.g. nano reports the file
+	 * "unwritable". We are a fake-root view of the FS, so report success for any
+	 * existing path (ENOENT only when it truly doesn't exist). access=SYSARG_1 path,
+	 * faccessat/faccessat2=SYSARG_2 path. */
+	if (nr == PR_access || nr == PR_faccessat || nr == PR_faccessat2) {
+		word_t pa = peek_reg(tracee, CURRENT, (nr == PR_access) ? SYSARG_1 : SYSARG_2);
+		char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
+		int q = ukfs_query_stat(rel, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks);
+		if (q == -1) return false;                 /* socket down: let host try */
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long)(q == 0 ? 0 : -ENOENT));
+		set_sysnum(tracee, PR_void); return true;
+	}
 
 	/* readlinkat on a symlink under the vmount. */
 	if (nr == PR_readlinkat) {
@@ -763,8 +813,9 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 
 	/* openat under the vmount: rewrite the path to a real placeholder so the
 	 * kernel returns a real fd, and stash the ukfs path for the exit hook.
-	 * (openat2 carries flags inside a struct open_how pointer, not SYSARG_3, so
-	 * it is intentionally not handled here.) */
+	 * openat2 carries flags inside a struct open_how pointer (SYSARG_3), so it is
+	 * decoded separately below — coreutils/glibc use it (e.g. `cp`), and missing
+	 * it sent the dest open straight to the host shadow mountpoint (data loss). */
 	if (nr == PR_openat) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2);
 		char gp[PATH_MAX];
@@ -772,31 +823,22 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		char rel[PATH_MAX];
 		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
 		int flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
-		unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
-		int q = ukfs_query_stat(rel, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks);
-		if (q == -1) return false;
-		int isdir = (q == 0) && ((mode & 0170000) == 0040000);   /* S_IFDIR */
-		if (q == -2) {
-			if (flags & O_CREAT) {
-				if (ukfs_create_at(rel, 0100644) < 0) {
-					poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EIO); set_sysnum(tracee, PR_void); return true;
-				}
-				isdir = 0;
-			} else {
-				poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOENT); set_sysnum(tracee, PR_void); return true;
-			}
-		}
-		if ((flags & O_DIRECTORY) && !isdir) {
-			poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOTDIR); set_sysnum(tracee, PR_void); return true;
-		}
-		/* O_TRUNC on an existing regular file: truncate the ukfs file now (the
-		 * /dev/null placeholder open won't), else `echo > existing` leaves stale
-		 * tail bytes past the freshly written content. q==0 => the file existed. */
-		if (!isdir && q == 0 && (flags & O_TRUNC))
-			(void) ukfs_simple("TRUNCATE 0 ", rel);
-		(void) set_sysarg_path(tracee, isdir ? "/" : "/dev/null", SYSARG_2);
-		open_pending_set(tracee->pid, isdir, rel);
-		return false;          /* let the rewritten open proceed; fd captured at exit */
+		return ukfs_open_redirect(tracee, rel, flags) == 1;
+	}
+	if (nr == PR_openat2) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2);
+		char gp[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		char rel[PATH_MAX];
+		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		/* struct open_how { __u64 flags; __u64 mode; __u64 resolve; } at SYSARG_3,
+		 * size in SYSARG_4. We only need flags (and let create use the default mode). */
+		word_t howp = peek_reg(tracee, CURRENT, SYSARG_3);
+		word_t howsz = peek_reg(tracee, CURRENT, SYSARG_4);
+		unsigned long long how[3] = { 0, 0, 0 };
+		size_t n = (size_t) howsz; if (n > sizeof how) n = sizeof how;
+		if (!howp || n < 8 || read_data(tracee, how, howp, n) < 0) return false;
+		return ukfs_open_redirect(tracee, rel, (int) how[0]) == 1;
 	}
 
 	return false;
@@ -842,7 +884,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 		return;
 	}
 
-	if (nr != PR_openat) return;
+	if (nr != PR_openat && nr != PR_openat2) return;
 	struct ukfs_pending *pp = NULL;
 	for (int i = 0; i < 64; i++)
 		if (g_open_pending[i].used && g_open_pending[i].pid == pid) { pp = &g_open_pending[i]; break; }
