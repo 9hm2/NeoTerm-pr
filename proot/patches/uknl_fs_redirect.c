@@ -341,12 +341,14 @@ struct ukfs_vfd {
 	int used, pid, fd, isdir, wrote;   /* wrote: needs a SYNC on close (deferred flush) */
 	long long off;                  /* regular-file read cursor */
 	char path[PATH_MAX];            /* vmount-relative */
+	char backing[64];               /* per-fd placeholder guest path (for mmap populate/cleanup) */
 	struct ukfs_dent *dents;        /* dir: parsed LIST incl. "." and ".." */
 	int dent_n, dent_idx;           /* count and emit cursor */
 };
-struct ukfs_pending { int used, pid, isdir; char path[PATH_MAX]; };
+struct ukfs_pending { int used, pid, isdir; char path[PATH_MAX]; char backing[64]; };
 static struct ukfs_vfd     g_vfd[128];
 static struct ukfs_pending g_open_pending[64];
+static int                 g_ph_seq;   /* unique per-open placeholder id */
 
 static struct ukfs_vfd *vfd_find(int pid, int fd)
 {
@@ -389,7 +391,7 @@ static int pend_res_take(int pid, word_t nr, long *res)
 	return 0;
 }
 
-static void open_pending_set(int pid, int isdir, const char *path)
+static void open_pending_set(int pid, int isdir, const char *path, const char *backing)
 {
 	int i;
 	for (i = 0; i < 64; i++) if (g_open_pending[i].used && g_open_pending[i].pid == pid) break;
@@ -397,6 +399,7 @@ static void open_pending_set(int pid, int isdir, const char *path)
 	if (i == 64) return;
 	g_open_pending[i].used = 1; g_open_pending[i].pid = pid; g_open_pending[i].isdir = isdir;
 	snprintf(g_open_pending[i].path, sizeof g_open_pending[i].path, "%s", path);
+	snprintf(g_open_pending[i].backing, sizeof g_open_pending[i].backing, "%s", backing ? backing : "");
 }
 
 /* Lazily LIST the directory and parse it (with synthetic "." / "..") on the
@@ -601,10 +604,51 @@ static int ukfs_open_redirect(Tracee *tracee, const char *rel, int flags)
 	 * tail bytes past the freshly written content. q==0 => the file existed. */
 	if (!isdir && q == 0 && (flags & O_TRUNC))
 		(void) ukfs_simple("TRUNCATE 0 ", rel);
-	(void) set_sysarg_path(tracee, isdir ? "/" : "/.ukfs_ph", SYSARG_2);
-	open_pending_set(tracee->pid, isdir, rel);
+	/* Files get a UNIQUE placeholder (not a shared /.ukfs_ph): mmap maps the
+	 * placeholder's real pages, so a shared empty file would SIGBUS and two mmap'd
+	 * files would collide. The unique inode is populated with real content on mmap
+	 * and unlinked right after open (anonymous; freed on close, no clutter). */
+	char backing[64]; backing[0] = 0;
+	if (isdir) {
+		(void) set_sysarg_path(tracee, "/", SYSARG_2);
+	} else {
+		snprintf(backing, sizeof backing, "/.ukfs_ph_%d_%d", tracee->pid, ++g_ph_seq);
+		(void) set_sysarg_path(tracee, backing, SYSARG_2);
+	}
+	open_pending_set(tracee->pid, isdir, rel, backing);
 	if (strstr(rel, "config")) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: OPEN rel='%s' flags=0x%x q=%d isdir=%d\n", rel, (unsigned) flags, q, isdir); uk_dbg_line(l); }
 	return isdir ? 2 : 0;
+}
+
+/* mmap(2) on a vfd maps the placeholder inode's real pages, NOT the intercepted
+ * read() data — so an empty placeholder SIGBUSes the moment the tracee touches
+ * the mapping (this is what crashed git: it mmaps packfiles/index). Fill the
+ * placeholder inode behind the guest fd with the file's true ukfs content (via
+ * /proc/<pid>/fd/<fd>, which refers to the same anonymous inode the guest mapped)
+ * and size it exactly, so the native mmap then sees real data. Streaming
+ * read()/write() stay intercepted; this only materialises bytes for mmap. */
+static void ukfs_populate_fd(Tracee *tracee, int fd, const char *relpath)
+{
+	unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
+	if (ukfs_query_stat(relpath, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks) != 0)
+		return;
+	char proc[64]; snprintf(proc, sizeof proc, "/proc/%d/fd/%d", tracee->pid, fd);
+	int bfd = open(proc, O_WRONLY | O_CLOEXEC);
+	if (bfd < 0) { char l[96]; snprintf(l, sizeof l, "uk_fs: mmap populate open(%s) errno=%d\n", proc, errno); uk_dbg_line(l); return; }
+	char *buf = malloc(65536);
+	long long off = 0;
+	if (buf) {
+		while (off < size) {
+			long n = ukfs_read_at(relpath, off, buf, 65536);
+			if (n <= 0) break;
+			if (pwrite(bfd, buf, (size_t) n, (off_t) off) != (ssize_t) n) break;
+			off += n;
+		}
+		free(buf);
+	}
+	(void) ftruncate(bfd, (off_t) size);
+	close(bfd);
+	{ char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: mmap populate fd=%d bytes=%lld p='%s'\n", fd, off, relpath); uk_dbg_line(l); }
 }
 
 static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
@@ -616,7 +660,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v29-repoke UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v30-mmap UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -668,6 +712,17 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 
 	if (!g_vmounted) return false;
 	ukfs_ensure_mounted();   /* perform the deferred ukfsd MOUNT on first access */
+
+	/* mmap(2)/mmap2(2) on a vfd: materialise the real content into the placeholder
+	 * inode the guest is about to map, then let the native mmap proceed. mmap fd is
+	 * SYSARG_5; MAP_ANONYMOUS opens (fd=-1) and non-vfd fds fall straight through. */
+	if (nr == PR_mmap || nr == PR_mmap2) {
+		int fd = (int) peek_reg(tracee, CURRENT, SYSARG_5);
+		struct ukfs_vfd *v = (fd >= 0) ? vfd_find(tracee->pid, fd) : NULL;
+		if (!v || v->isdir) return false;
+		ukfs_populate_fd(tracee, fd, v->path);
+		return false;     /* native mmap now maps real bytes */
+	}
 
 	/* fd-based ops on a vfd (set up by a prior openat). */
 	if (nr == PR_read || nr == PR_pread64) {
@@ -1190,6 +1245,15 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 			memset(v, 0, sizeof *v);
 			v->used = 1; v->pid = pid; v->fd = (int) fd; v->isdir = pp->isdir; v->off = 0;
 			snprintf(v->path, sizeof v->path, "%s", pp->path);
+			snprintf(v->backing, sizeof v->backing, "%s", pp->backing);
+		}
+		/* Unlink the per-fd placeholder now: the guest fd keeps the inode alive
+		 * (anonymous), mmap-populate reaches it via /proc/<pid>/fd/<fd>, and it is
+		 * auto-freed on close — so no /.ukfs_ph_* files accumulate in the rootfs. */
+		if (pp->backing[0]) {
+			char host[PATH_MAX];
+			if (translate_path(tracee, host, AT_FDCWD, pp->backing, false) >= 0)
+				(void) unlink(host);
 		}
 	}
 	pp->used = 0;
