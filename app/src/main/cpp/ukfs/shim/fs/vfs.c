@@ -1371,6 +1371,14 @@ long ukfs_rename(const char *oldpath, const char *newpath)
 	char osave[256]; strncpy(osave, oleaf, sizeof(osave)-1); osave[sizeof(osave)-1]=0;  /* g_leafbuf-ot a 2. walk felülírja */
 	struct dentry *nde = api_walk(newpath, &ndir, &npd, &nleaf);
 	if (!ndir || !nleaf) return -1;                    /* rossz cél-út */
+	/* rename onto the SAME file is a POSIX no-op. The VFS layer normally short-circuits
+	 * this before calling ->rename; we call the driver directly, and vfat_rename would
+	 * detach the (shared) inode and then fat_remove_entries the source slot — DELETING
+	 * the file. FAT has no hard links, so an identical target inode always means the
+	 * very same file (incl. a case-only "rename" on case-insensitive vfat, e.g.
+	 * `mv lower LOWER`): bail out intact rather than lose it. */
+	if (nde && nde->d_inode && nde->d_inode == ode->d_inode)
+		return 0;
 	if (!odir->i_op || !odir->i_op->rename) return -1;
 	ode->d_parent = opd;
 	ode->d_name.name = (const unsigned char *)strdup(osave);

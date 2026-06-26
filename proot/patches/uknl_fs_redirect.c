@@ -364,11 +364,11 @@ static int ukfs_two_path(const char *cmd, const char *a, const char *b)
  * resolvers) reading/mmap'ing a fd that the leader opened wouldn't find the vfd,
  * and its read would hit the empty placeholder ("premature end of pack file").
  * The tid->tgid map is stable for a thread's lifetime, so cache it. */
+static struct { int tid, tgid; } g_tgid_cache[512];
+static int g_tgid_cn = 0;
 static int ukfs_tgid(int tid)
 {
-	static struct { int tid, tgid; } cache[512];
-	static int cn = 0;
-	for (int i = 0; i < cn; i++) if (cache[i].tid == tid) return cache[i].tgid;
+	for (int i = 0; i < g_tgid_cn; i++) if (g_tgid_cache[i].tid == tid) return g_tgid_cache[i].tgid;
 	int tgid = tid;
 	char path[64]; snprintf(path, sizeof path, "/proc/%d/status", tid);
 	int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -376,8 +376,21 @@ static int ukfs_tgid(int tid)
 		char buf[2048]; ssize_t n = read(fd, buf, sizeof buf - 1); close(fd);
 		if (n > 0) { buf[n] = '\0'; char *t = strstr(buf, "Tgid:"); if (t) tgid = atoi(t + 5); }
 	}
-	if (cn < 512) { cache[cn].tid = tid; cache[cn].tgid = tgid; cn++; }
+	if (g_tgid_cn < 512) { g_tgid_cache[g_tgid_cn].tid = tid; g_tgid_cache[g_tgid_cn].tgid = tgid; g_tgid_cn++; }
 	return tgid;
+}
+/* parent pid of @tid (from /proc/<tid>/status PPid). Read fresh (not cached): used
+ * only on the lazy inheritance walk, which runs once per process. */
+static int ukfs_ppid(int tid)
+{
+	int ppid = 0;
+	char path[64]; snprintf(path, sizeof path, "/proc/%d/status", tid);
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		char buf[2048]; ssize_t n = read(fd, buf, sizeof buf - 1); close(fd);
+		if (n > 0) { buf[n] = '\0'; char *t = strstr(buf, "PPid:"); if (t) ppid = atoi(t + 5); }
+	}
+	return ppid;
 }
 
 /* ---- vfd table: a guest fd (over a placeholder file) -> a ukfsd path. The
@@ -410,6 +423,52 @@ static struct ukfs_vfd *vfd_alloc(void)
 	return NULL;
 }
 static void vfd_free(struct ukfs_vfd *v) { if (v) { free(v->dents); memset(v, 0, sizeof *v); } }
+
+/* Lazy fd-inheritance: a forked child inherits a COPY of the parent's fd table, but
+ * our vfds are keyed by tgid, so the child's tgid starts empty. proot tracks
+ * fork/clone via ptrace EVENTS (not translate_syscall_exit), so we can't copy at
+ * fork time. Instead, the FIRST time a tgid does any fd op, walk up the process
+ * ancestry and copy the nearest ancestor's vfds into this tgid — capturing exactly
+ * the inherited fds (classically the shell's `cmd > file`: the shell opens the file,
+ * dup2s it onto fd 1, then forks the external cmd). Race-free (driven by the child's
+ * own op) and O(1) afterwards. */
+static int g_inh_tgid[512];
+static int g_inh_n = 0;
+static int inh_mark(int tg)   /* returns 1 if already resolved, else records + returns 0 */
+{
+	for (int i = 0; i < g_inh_n; i++) if (g_inh_tgid[i] == tg) return 1;
+	if (g_inh_n < 512) g_inh_tgid[g_inh_n++] = tg;
+	return g_inh_n >= 512;     /* table full: treat as resolved (skip the walk) */
+}
+static struct ukfs_vfd *vfd_lookup(Tracee *tracee, int fd)
+{
+	int tg = ukfs_tgid(tracee->pid);
+	struct ukfs_vfd *v = vfd_find(tg, fd);
+	if (v) return v;
+	if (inh_mark(tg)) return NULL;            /* ancestry already resolved for this tgid */
+	int tid = tracee->pid;
+	for (int hop = 0; hop < 16; hop++) {       /* walk to the nearest ancestor with vfds */
+		int ppid = ukfs_ppid(tid);
+		if (ppid <= 1) break;
+		int ptg = ukfs_tgid(ppid);
+		if (ptg != tg) {
+			int idx[128], ni = 0;
+			for (int i = 0; i < 128 && ni < 128; i++)
+				if (g_vfd[i].used && g_vfd[i].pid == ptg) idx[ni++] = i;
+			if (ni) {
+				for (int k = 0; k < ni; k++) {
+					struct ukfs_vfd *nv = vfd_alloc();
+					if (!nv) break;
+					*nv = g_vfd[idx[k]]; nv->pid = tg;
+					nv->dents = NULL; nv->dent_n = nv->dent_idx = 0;
+				}
+				break;                     /* nearest ancestor with vfds wins */
+			}
+		}
+		tid = ppid;
+	}
+	return vfd_find(tg, fd);
+}
 
 /* Pending-result table: for path syscalls I PR_void at sysENTER (renameat,
  * mkdirat, unlinkat, …), proot's PR_void result-restoration does NOT reliably
@@ -611,7 +670,7 @@ static int ukfs_rel_at(Tracee *tracee, int dirfd, const char *path, char *rel, s
 		snprintf(abs, sizeof abs, "%s/%s", cwd, path);
 		return ukfs_rel(abs, rel, rsz);
 	}
-	struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), dirfd);
+	struct ukfs_vfd *v = vfd_lookup(tracee, dirfd);
 	if (!v) return 0;                       /* dirfd isn't one of our mount fds */
 	if (!path[0])
 		snprintf(rel, rsz, "%s", v->path);              /* empty path => the dir itself */
@@ -741,7 +800,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v44-walk-trunc-creat UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v45-fork-exec-cfr UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -794,6 +853,45 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!g_vmounted) return false;
 	ukfs_ensure_mounted();   /* perform the deferred ukfsd MOUNT on first access */
 
+	/* execve/execveat of a program stored ON the vmount. The kernel would read the
+	 * (empty) placeholder and fail with ENOEXEC ("not found"). Materialise the ukfs
+	 * file into a real rootfs temp file the kernel can actually read+exec, and rewrite
+	 * the exec path to it; proot then loads the temp normally. For a #! script the
+	 * interpreter re-opens this same real path, so it works too. The temp is named per
+	 * pid (overwritten on the pid's next exec — bounded, no unlink so scripts can read
+	 * it). Non-vmount execs are returned untouched. */
+	if (nr == PR_execve || nr == PR_execveat) {
+		int patharg = (nr == PR_execveat) ? SYSARG_2 : SYSARG_1;
+		int dirfd = (nr == PR_execveat) ? (int) peek_reg(tracee, CURRENT, SYSARG_1) : AT_FDCWD;
+		word_t pa = peek_reg(tracee, CURRENT, patharg);
+		char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel_at(tracee, dirfd, gp, rel, sizeof rel)) return false;   /* not under vmount */
+		unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
+		if (ukfs_query_stat(rel, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks) != 0) return false;
+		if ((mode & 0170000) != 0100000) return false;   /* only regular files */
+		char gtmp[64]; snprintf(gtmp, sizeof gtmp, "/.ukfs_exec_%d", tracee->pid);
+		char htmp[PATH_MAX];
+		if (translate_path(tracee, htmp, AT_FDCWD, gtmp, false) < 0) return false;
+		int bfd = open(htmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+		if (bfd < 0) return false;
+		char *buf = malloc(65536); long long off = 0; int ok = 1;
+		if (buf) {
+			while (off < size) {
+				long n = ukfs_read_at(rel, off, buf, 65536);
+				if (n <= 0) break;
+				if (write(bfd, buf, (size_t) n) != (ssize_t) n) { ok = 0; break; }
+				off += n;
+			}
+			free(buf);
+		} else ok = 0;
+		(void) fchmod(bfd, 0755);
+		close(bfd);
+		if (!ok || off < size) { (void) unlink(htmp); return false; }   /* materialise failed: let it ENOEXEC */
+		(void) set_sysarg_path(tracee, gtmp, patharg);   /* exec the temp instead */
+		return false;                                    /* let proot/kernel run execve */
+	}
+
 	/* chdir/fchdir INTO the vmount. proot would translate the target to the (empty)
 	 * host shadow and lstat it -> ENOENT, so `cd` into the mounted FS fails and any
 	 * tool that then uses RELATIVE paths (mkdir -p, configure, git, make) breaks
@@ -818,7 +916,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_fchdir) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v || !v->isdir) return false;
 		char canon[PATH_MAX];
 		if (v->path[0] == '/' && v->path[1] == '\0') snprintf(canon, sizeof canon, "%s", g_vmount);
@@ -850,7 +948,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	 * SYSARG_5; MAP_ANONYMOUS opens (fd=-1) and non-vfd fds fall straight through. */
 	if (nr == PR_mmap || nr == PR_mmap2) {
 		int fd = (int) peek_reg(tracee, CURRENT, SYSARG_5);
-		struct ukfs_vfd *v = (fd >= 0) ? vfd_find(ukfs_tgid(tracee->pid), fd) : NULL;
+		struct ukfs_vfd *v = (fd >= 0) ? vfd_lookup(tracee, fd) : NULL;
 		if (!v || v->isdir) return false;
 		ukfs_populate_fd(tracee, fd, v->path);
 		return false;     /* native mmap now maps real bytes */
@@ -858,7 +956,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 
 	/* fd-based ops on a vfd (set up by a prior openat). */
 	if (nr == PR_read || nr == PR_pread64) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v || v->isdir) return false;
 		long long pos = (nr == PR_pread64)
 			? (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_4) : v->off;
@@ -875,7 +973,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) n); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_write || nr == PR_pwrite64) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v || v->isdir) return false;
 		long long pos = (nr == PR_pwrite64)
 			? (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_4) : v->off;
@@ -906,8 +1004,22 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		v->wrote = 1;          /* defer the block-device flush to close (SYNC) */
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) n); set_sysnum(tracee, PR_void); return true;
 	}
+	/* copy_file_range(fd_in,_,fd_out,_,len,_) and sendfile(out_fd,in_fd,...) move bytes
+	 * directly between two kernel fds. When one side is a vmount placeholder fd, the
+	 * kernel copy bypasses ukfs entirely (data goes to/from the empty placeholder) —
+	 * e.g. `mv hostfile mnt/x` (rename EXDEV -> coreutils copy_file_range) lands an
+	 * empty file. Report ENOSYS so libc/coreutils fall back to the read()/write() loop,
+	 * which we DO intercept. (Pure host<->host copies are left to the kernel.) */
+	if (nr == PR_copy_file_range || nr == PR_sendfile || nr == PR_sendfile64) {
+		int in_fd, out_fd;
+		if (nr == PR_copy_file_range) { in_fd = (int) peek_reg(tracee, CURRENT, SYSARG_1); out_fd = (int) peek_reg(tracee, CURRENT, SYSARG_3); }
+		else { out_fd = (int) peek_reg(tracee, CURRENT, SYSARG_1); in_fd = (int) peek_reg(tracee, CURRENT, SYSARG_2); }
+		if (!vfd_lookup(tracee, in_fd) && !vfd_lookup(tracee, out_fd)) return false;   /* neither side is ours */
+		pend_res_set(tracee->pid, nr, -ENOSYS);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOSYS); set_sysnum(tracee, PR_void); return true;
+	}
 	if (nr == PR_ftruncate) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v) return false;
 		long long sz = (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_2);
 		char pfx[48]; snprintf(pfx, sizeof pfx, "TRUNCATE %lld ", sz);
@@ -915,7 +1027,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_lseek) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v) return false;
 		long long off = (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_2);
 		int whence = (int) peek_reg(tracee, CURRENT, SYSARG_3);
@@ -932,7 +1044,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		poke_reg(tracee, SYSARG_RESULT, (word_t) no); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_getdents64) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v || !v->isdir) return false;
 		if (!v->dents && ukfs_load_dir(v) < 0) {
 			poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EIO); set_sysnum(tracee, PR_void); return true;
@@ -956,7 +1068,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		poke_reg(tracee, SYSARG_RESULT, (word_t) w); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_close) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (v) {
 			/* Flush deferred writes once, here, instead of per write() — the latter
 			 * is O(n^2) (each sync rewrites the whole dirty-buffer list). */
@@ -972,7 +1084,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	 * ukfsd's page cache until close). The placeholder fd is /dev/null, whose fsync
 	 * returns EINVAL — which makes editors report "Error writing: Invalid argument". */
 	if (nr == PR_fsync || nr == PR_fdatasync) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v) return false;
 		if (v->wrote) { (void) ukfs_simple("SYNC ", v->path); v->wrote = 0; }
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
@@ -982,7 +1094,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	 * adjust_shared_perm on .git/config: "could not write config file ... Operation
 	 * not permitted"). Route them to the ukfs path instead. */
 	if (nr == PR_fchmod) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v) return false;
 		unsigned mode = (unsigned) peek_reg(tracee, CURRENT, SYSARG_2) & 07777;
 		char pfx[48]; snprintf(pfx, sizeof pfx, "CHMOD %u ", mode);
@@ -990,7 +1102,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_fchown) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v) return false;
 		unsigned uid = (unsigned) peek_reg(tracee, CURRENT, SYSARG_2);
 		unsigned gid = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3);
@@ -1003,7 +1115,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	 * mount root (the dir fd ls opens) shows the real FS stat, not the host
 	 * placeholder fd's stat. (Needs PR_fstat in the seccomp trap set.) */
 	if (nr == PR_fstat) {
-		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v) return false;
 		unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
 		if (ukfs_query_stat(v->path, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks) != 0)
@@ -1025,7 +1137,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		} else {
 			int flags = (int) peek_reg(tracee, CURRENT, (nr == PR_statx) ? SYSARG_3 : SYSARG_4);
 			if (flags & 0x1000 /* AT_EMPTY_PATH */) {
-				struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+				struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 				if (v) { snprintf(rel, sizeof rel, "%s", v->path); have_rel = 1; }
 			}
 		}
@@ -1081,9 +1193,12 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		pend_res_set(tracee->pid, nr, 0);
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
-	/* utimensat/utimes under the vmount: report success (same fake_id0-bypass
-	 * reason). Path in SYSARG_2 (utimensat/futimesat) or SYSARG_1 (utimes); an
-	 * empty/NULL path means the dirfd itself (futimens). */
+	/* utimensat/futimesat/utimes under the vmount: actually SET the times via the
+	 * engine's UTIME op (FAT stores mtime/atime), not a no-op — `make` depends on
+	 * mtime ordering, and cp -p/tar/touch -d/rsync restore explicit times. Path in
+	 * SYSARG_2 (utimensat/futimesat) or SYSARG_1 (utimes); an empty/NULL path means
+	 * the dirfd itself (futimens). Times array: SYSARG_3 (utimensat/futimesat) or
+	 * SYSARG_2 (utimes); NULL => now. nsec==-1 to the engine means "leave unchanged". */
 	if (nr == PR_utimensat || nr == PR_futimesat || nr == PR_utimes) {
 		word_t pa = peek_reg(tracee, CURRENT, (nr == PR_utimes) ? SYSARG_1 : SYSARG_2);
 		char gp[PATH_MAX], rel[PATH_MAX];
@@ -1091,10 +1206,29 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 			if (!ukfs_rel_at(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1), gp, rel, sizeof rel)) return false;
 		} else {
 			if (nr == PR_utimes) return false;          /* utimes needs a path */
-			if (!vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1))) return false;
+			struct ukfs_vfd *vv = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
+			if (!vv) return false;
+			snprintf(rel, sizeof rel, "%s", vv->path);
 		}
-		pend_res_set(tracee->pid, nr, 0);
-		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
+		long long asec = -1, ansec = -1, msec = -1, mnsec = -1;
+		long nowt = (long) time(0);
+		int is_ts = (nr == PR_utimensat);          /* timespec (nsec) vs timeval (usec) */
+		word_t tp = peek_reg(tracee, CURRENT, (nr == PR_utimes) ? SYSARG_2 : SYSARG_3);
+		long long t[4];
+		if (!tp || read_data(tracee, t, tp, sizeof t) < 0) {
+			asec = msec = nowt; ansec = mnsec = 0;     /* NULL times => now */
+		} else {
+			if (is_ts && t[1] == 0x3ffffffe) ansec = -1;                         /* UTIME_OMIT */
+			else if (is_ts && t[1] == 0x3fffffff) { asec = nowt; ansec = 0; }    /* UTIME_NOW  */
+			else { asec = t[0]; ansec = is_ts ? t[1] : t[1] * 1000; }
+			if (is_ts && t[3] == 0x3ffffffe) mnsec = -1;
+			else if (is_ts && t[3] == 0x3fffffff) { msec = nowt; mnsec = 0; }
+			else { msec = t[2]; mnsec = is_ts ? t[3] : t[3] * 1000; }
+		}
+		char cmd[160]; snprintf(cmd, sizeof cmd, "UTIME %lld %lld %lld %lld ", asec, ansec, msec, mnsec);
+		long r = ukfs_simple(cmd, rel);
+		pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
 
 	/* access(2) family under the vmount. access() checks the REAL uid, which under
@@ -1157,7 +1291,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
 		int mdfd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
 		if (!ukfs_rel_at(tracee, mdfd, gp, rel, sizeof rel)) {
-			struct ukfs_vfd *mv = (gp[0] != '/' && mdfd != AT_FDCWD) ? vfd_find(ukfs_tgid(tracee->pid), mdfd) : NULL;
+			struct ukfs_vfd *mv = (gp[0] != '/' && mdfd != AT_FDCWD) ? vfd_lookup(tracee, mdfd) : NULL;
 			char l[PATH_MAX + 96];
 			snprintf(l, sizeof l, "uk_fs: MKDIR-MISS dirfd=%d gp='%s' vfd=%p tgid=%d\n",
 			         mdfd, gp, (void*) mv, ukfs_tgid(tracee->pid));
