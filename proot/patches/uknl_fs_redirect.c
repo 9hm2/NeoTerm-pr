@@ -533,9 +533,12 @@ static int ukfs_rel_at(Tracee *tracee, int dirfd, const char *path, char *rel, s
 }
 
 /* Shared openat/openat2 redirect for a vmount-relative path @rel with open
- * @flags. Returns 1 if fully handled (SYSARG_RESULT poked + PR_void), 0 if it
- * rewrote the path to a placeholder so the real open proceeds (fd bound at exit),
- * -1 to not intercept (socket down -> let the host try). */
+ * @flags. Return codes: 1 = fully handled (SYSARG_RESULT poked + PR_void);
+ * 0 = rewrote to the FILE placeholder, caller must force O_CREAT so it
+ * self-creates; 2 = rewrote to the DIR placeholder ("/"); -1 = not intercepted.
+ * The file placeholder is a REAL regular file (/.ukfs_ph), not /dev/null, so that
+ * fd-based metadata ops the guest does on it (utimensat/fchmod/fsetxattr/ioctl)
+ * succeed instead of EPERMing on the root-owned /dev/null device. */
 static int ukfs_open_redirect(Tracee *tracee, const char *rel, int flags)
 {
 	unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
@@ -563,9 +566,9 @@ static int ukfs_open_redirect(Tracee *tracee, const char *rel, int flags)
 	 * tail bytes past the freshly written content. q==0 => the file existed. */
 	if (!isdir && q == 0 && (flags & O_TRUNC))
 		(void) ukfs_simple("TRUNCATE 0 ", rel);
-	(void) set_sysarg_path(tracee, isdir ? "/" : "/dev/null", SYSARG_2);
+	(void) set_sysarg_path(tracee, isdir ? "/" : "/.ukfs_ph", SYSARG_2);
 	open_pending_set(tracee->pid, isdir, rel);
-	return 0;
+	return isdir ? 2 : 0;
 }
 
 static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
@@ -577,7 +580,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v17-syncperf UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v18-realph UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -934,13 +937,17 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (!ukfs_rel_at(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1), gp, rel, sizeof rel)) return false;
 		int flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
 		int r = ukfs_open_redirect(tracee, rel, flags);
-		if (r == 0)
-			/* The placeholder is /dev/null (or "/"); strip O_CREAT/O_EXCL/O_TRUNC/
-			 * O_DIRECTORY so the real open of it always succeeds. Otherwise an
-			 * O_EXCL create (e.g. plain `cp`) hits "File exists" on /dev/null, and
-			 * O_DIRECTORY|<file> would wrongly fail. Create/trunc already happened
-			 * on the FS side. */
+		if (r == 0) {
+			/* FILE placeholder (/.ukfs_ph): force O_CREAT so it self-creates, strip
+			 * O_EXCL/O_TRUNC/O_DIRECTORY (else O_EXCL would "File exists" once it
+			 * exists), set a sane create mode. Real create/trunc already happened on
+			 * the FS side; the placeholder just yields a usable, writable real fd. */
+			poke_reg(tracee, SYSARG_3, (word_t)(unsigned)((flags & ~(O_EXCL | O_TRUNC | O_DIRECTORY)) | O_CREAT));
+			poke_reg(tracee, SYSARG_4, (word_t) 0600);
+		} else if (r == 2) {
+			/* DIR placeholder ("/"): strip create/excl/trunc/dir-flag. */
 			poke_reg(tracee, SYSARG_3, (word_t)(unsigned)(flags & ~(O_CREAT | O_EXCL | O_TRUNC | O_DIRECTORY)));
+		}
 		return r == 1;
 	}
 	if (nr == PR_openat2) {
@@ -957,11 +964,12 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		size_t n = (size_t) howsz; if (n > sizeof how) n = sizeof how;
 		if (!howp || n < 8 || read_data(tracee, how, howp, n) < 0) return false;
 		int r = ukfs_open_redirect(tracee, rel, (int) how[0]);
-		if (r == 0) {
-			/* Same placeholder-flag strip as openat, plus clear the resolve field
-			 * so the absolute /dev/null placeholder isn't rejected by a
-			 * RESOLVE_BENEATH/RESOLVE_IN_ROOT restriction. Write open_how back. */
+		if (r == 0 || r == 2) {
+			/* FILE placeholder (/.ukfs_ph): force O_CREAT + mode so it self-creates.
+			 * DIR placeholder ("/"): just strip create/excl/trunc/dir. Clear resolve
+			 * so the absolute placeholder isn't rejected by RESOLVE_BENEATH/IN_ROOT. */
 			how[0] &= ~(unsigned long long)(O_CREAT | O_EXCL | O_TRUNC | O_DIRECTORY);
+			if (r == 0) { how[0] |= O_CREAT; how[1] = 0600; }
 			how[2] = 0;
 			write_data(tracee, howp, how, n);
 		}
