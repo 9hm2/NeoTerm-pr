@@ -979,6 +979,8 @@ if 'uk_fs_sysnums' not in s:
                   '\t\t\t{ PR_dup3,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_fsync,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_fdatasync,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_fchmod,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_fchown,\tFILTER_SYSEXIT },\n'
                   '\t\t\tFILTERED_SYSNUM_END,\n'
                   '\t\t};\n'
                   '\t\tstatus = merge_filtered_sysnums(tracee->ctx, &filtered_sysnums, uk_fs_sysnums);\n'

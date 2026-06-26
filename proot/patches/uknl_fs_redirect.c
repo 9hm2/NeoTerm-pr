@@ -577,7 +577,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v15-cwd UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v16-fchmod UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -721,6 +721,27 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (nr == PR_fsync || nr == PR_fdatasync) {
 		struct ukfs_vfd *v = vfd_find(tracee->pid, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v) return false;
+		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
+	}
+	/* fd-based metadata on a vfd. The placeholder is /dev/null, so fchmod/fchown on
+	 * it return EPERM — which breaks tools that set perms via the fd (e.g. git's
+	 * adjust_shared_perm on .git/config: "could not write config file ... Operation
+	 * not permitted"). Route them to the ukfs path instead. */
+	if (nr == PR_fchmod) {
+		struct ukfs_vfd *v = vfd_find(tracee->pid, (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		if (!v) return false;
+		unsigned mode = (unsigned) peek_reg(tracee, CURRENT, SYSARG_2) & 07777;
+		char pfx[48]; snprintf(pfx, sizeof pfx, "CHMOD %u ", mode);
+		(void) ukfs_simple(pfx, v->path);            /* best-effort; FAT perms are cosmetic */
+		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_fchown) {
+		struct ukfs_vfd *v = vfd_find(tracee->pid, (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		if (!v) return false;
+		unsigned uid = (unsigned) peek_reg(tracee, CURRENT, SYSARG_2);
+		unsigned gid = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3);
+		char pfx[64]; snprintf(pfx, sizeof pfx, "CHOWN %u %u ", uid, gid);
+		(void) ukfs_simple(pfx, v->path);
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
 
