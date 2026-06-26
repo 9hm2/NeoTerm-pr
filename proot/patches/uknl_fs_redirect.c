@@ -183,8 +183,10 @@ static int ukfs_query_stat(const char *rel, unsigned *mode, unsigned *uid, unsig
 	char line[256];
 	if (uksd_rl(s, line, sizeof line) < 0) { ukfs_sdrop(); return -1; }
 	if (sscanf(line, "OK %u %u %u %ld %lu %ld %ld %u %lu %lu",
-	           mode, uid, gid, size, ino, mtime, atime, nlink, rdev, blocks) != 10)
+	           mode, uid, gid, size, ino, mtime, atime, nlink, rdev, blocks) != 10) {
+		{ char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: query_stat '%s' BAD reply='%s'\n", rel, line); uk_dbg_line(l); }
 		return -2;
+	}
 	return 0;
 }
 
@@ -194,11 +196,31 @@ static void ukfs_put_stat(Tracee *tracee, word_t addr, unsigned mode, unsigned u
 	long size, unsigned long ino, long mtime, long atime, unsigned nlink,
 	unsigned long rdev, unsigned long blocks)
 {
-	unsigned char st[128]; memset(st, 0, sizeof st);
+	unsigned char st[144]; memset(st, 0, sizeof st);
 	unsigned long st_ino = ino, st_rdev = rdev;
 	unsigned int  st_mode = mode, st_nlink = nlink ? nlink : 1, st_uid = uid, st_gid = gid;
-	long st_size = size, st_blocks = (long) blocks; int st_blksize = 512;
+	long st_size = size, st_blocks = (long) blocks;
 	long at_s = atime, mt_s = mtime, ct_s = mtime;
+#if defined(__x86_64__)
+	/* x86_64 struct stat (144 B): st_nlink(8)@16, st_mode@24, uid@28, gid@32,
+	 * rdev@40, size@48, blksize(8)@56, blocks(8)@64, a/m/ctime@72/88/104. Only
+	 * used by the host integration test build; aarch64 keeps its own layout. */
+	unsigned long st_nlink8 = st_nlink, st_blksize8 = 512;
+	memcpy(st + 8,   &st_ino,    8);
+	memcpy(st + 16,  &st_nlink8, 8);
+	memcpy(st + 24,  &st_mode,   4);
+	memcpy(st + 28,  &st_uid,    4);
+	memcpy(st + 32,  &st_gid,    4);
+	memcpy(st + 40,  &st_rdev,   8);
+	memcpy(st + 48,  &st_size,   8);
+	memcpy(st + 56,  &st_blksize8, 8);
+	memcpy(st + 64,  &st_blocks, 8);
+	memcpy(st + 72,  &at_s,      8);
+	memcpy(st + 88,  &mt_s,      8);
+	memcpy(st + 104, &ct_s,      8);
+#else
+	/* aarch64 struct stat (128 B) — offsets match the block proxy's uksd_put_stat. */
+	int st_blksize = 512;
 	memcpy(st + 8,  &st_ino,     8);
 	memcpy(st + 16, &st_mode,    4);
 	memcpy(st + 20, &st_nlink,   4);
@@ -211,6 +233,7 @@ static void ukfs_put_stat(Tracee *tracee, word_t addr, unsigned mode, unsigned u
 	memcpy(st + 72, &at_s,       8);   /* st_atime.tv_sec  */
 	memcpy(st + 88, &mt_s,       8);   /* st_mtime.tv_sec  */
 	memcpy(st + 104, &ct_s,      8);   /* st_ctime.tv_sec  */
+#endif
 	write_data(tracee, addr, st, sizeof st);
 }
 
@@ -706,7 +729,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v38-fcntldup UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v40-statxfix UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -971,6 +994,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		int q = ukfs_query_stat(rel, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks);
 		if (q == -1) return false;                 /* socket down: let host try */
 		if (q == -2) {
+			pend_res_set(tracee->pid, nr, -ENOENT);
 			poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOENT);
 			set_sysnum(tracee, PR_void); return true;
 		}
@@ -980,6 +1004,11 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		else
 			ukfs_put_stat(tracee, peek_reg(tracee, CURRENT, SYSARG_3),
 			              mode, uid, gid, size, ino, mt, at, nlink, rdev, blocks);
+		/* re-poke the result from exit_final: statx/newfstatat are FILTER_SYSENTER
+		 * path syscalls whose PR_void result can be clobbered before the tracee
+		 * resumes (same loss as renameat) — without this, stat() of a directory can
+		 * spuriously return ENOENT. The struct written above survives (guest memory). */
+		pend_res_set(tracee->pid, nr, 0);
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		return true;
@@ -1203,6 +1232,91 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 			write_data(tracee, howp, how, n);
 		}
 		return r == 1;
+	}
+
+	/* ---- legacy non-*at syscalls (path in SYSARG_1). aarch64 has ONLY the *at
+	 * forms, so these never fire on-device; x86_64 and 32-bit ABIs use them, so
+	 * handling them makes the redirect portable and lets the host integration test
+	 * exercise the real stack. Each delegates to the same ukfsd op as its *at twin
+	 * with AT_FDCWD. ---- */
+	if (nr == PR_mkdir) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;
+		unsigned mode = (unsigned) peek_reg(tracee, CURRENT, SYSARG_2) & 07777;
+		char pfx[48]; snprintf(pfx, sizeof pfx, "MKDIR %u ", mode);
+		long r = ukfs_simple(pfx, rel); pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_rmdir || nr == PR_unlink) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;
+		long r = ukfs_simple(nr == PR_rmdir ? "RMDIR " : "UNLINK ", rel); pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_rename) {
+		word_t oa = peek_reg(tracee, CURRENT, SYSARG_1), na = peek_reg(tracee, CURRENT, SYSARG_2);
+		char og[PATH_MAX], ng[PATH_MAX], orel[PATH_MAX], nrel[PATH_MAX];
+		if (!oa || read_string(tracee, og, oa, sizeof og) <= 0) return false;
+		if (!na || read_string(tracee, ng, na, sizeof ng) <= 0) return false;
+		int uo = ukfs_rel_at(tracee, AT_FDCWD, og, orel, sizeof orel);
+		int un = ukfs_rel_at(tracee, AT_FDCWD, ng, nrel, sizeof nrel);
+		if (!uo && !un) return false;
+		long r = (uo != un) ? -EXDEV : ukfs_two_path("RENAME", orel, nrel);
+		pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_chmod) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;
+		unsigned mode = (unsigned) peek_reg(tracee, CURRENT, SYSARG_2) & 07777;
+		char pfx[48]; snprintf(pfx, sizeof pfx, "CHMOD %u ", mode);
+		long r = ukfs_simple(pfx, rel); pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_chown || nr == PR_lchown) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;
+		unsigned uid = (unsigned) peek_reg(tracee, CURRENT, SYSARG_2), gid = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3);
+		char pfx[64]; snprintf(pfx, sizeof pfx, "CHOWN %u %u ", uid, gid);
+		long r = ukfs_simple(pfx, rel); pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_stat || nr == PR_lstat || nr == PR_stat64 || nr == PR_lstat64) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) return false;
+		unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
+		int q = ukfs_query_stat(rel, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks);
+		if (q == -1) return false;
+		if (q == -2) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOENT); set_sysnum(tracee, PR_void); return true; }
+		ukfs_put_stat(tracee, peek_reg(tracee, CURRENT, SYSARG_2), mode, uid, gid, size, ino, mt, at, nlink, rdev, blocks);
+		pend_res_set(tracee->pid, nr, 0);
+		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_readlink) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		char tgt[PATH_MAX]; long n = ukfs_readlink_at(rel, tgt, sizeof tgt);
+		if (n < 0) { pend_res_set(tracee->pid, nr, -EINVAL); poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EINVAL); set_sysnum(tracee, PR_void); return true; }
+		size_t bufsz = (size_t) peek_reg(tracee, CURRENT, SYSARG_3); word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
+		if ((size_t) n > bufsz) n = (long) bufsz;
+		if (n > 0) write_data(tracee, buf, tgt, (size_t) n);
+		pend_res_set(tracee->pid, nr, n);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) n); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_symlink) {
+		word_t ta = peek_reg(tracee, CURRENT, SYSARG_1), la = peek_reg(tracee, CURRENT, SYSARG_2);
+		char target[PATH_MAX], lp[PATH_MAX], rel[PATH_MAX];
+		if (!ta || read_string(tracee, target, ta, sizeof target) <= 0) return false;
+		if (!la || read_string(tracee, lp, la, sizeof lp) <= 0) return false;
+		if (!ukfs_rel_at(tracee, AT_FDCWD, lp, rel, sizeof rel)) return false;
+		long r = ukfs_two_path("SYMLINK", target, rel); pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
 
 	/* TEMP DIAG (git clone EPERM): a trapped syscall reached here unhandled while a

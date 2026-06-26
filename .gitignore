@@ -41,3 +41,4 @@ proguard/
 # Python bytecode cache (e.g. from patch-script syntax checks)
 __pycache__/
 *.pyc
+/proot/.download/

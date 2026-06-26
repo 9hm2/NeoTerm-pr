@@ -1035,7 +1035,7 @@ int ukfs_list_dir(const char *path, struct ukfs_dirent **out)
 	if (!g_api_root) { *out = g_api_dir; return 0; }
 	g_api_dirn = 0;
 	struct dentry *dd = (!path || !*path) ? g_api_root : api_lookup(path);
-	if (!dd || !dd->d_inode) { fprintf(stderr, "ukfsd: list '%s' NOTFOUND dd=%p\n", path?path:"", (void*)dd); fflush(stderr); *out = g_api_dir; return 0; }
+	if (!dd || !dd->d_inode) { *out = g_api_dir; return 0; }
 	struct inode *dir = dd->d_inode;
 	if (!dir->i_fop || !dir->i_fop->iterate_shared) { *out = g_api_dir; return 0; }
 	struct file f; memset(&f, 0, sizeof(f));
@@ -1053,8 +1053,6 @@ int ukfs_list_dir(const char *path, struct ukfs_dirent **out)
 		else { strncpy(full, g_api_dir[i].name, sizeof(full)-1); full[sizeof(full)-1]=0; }
 		g_api_dir[i].size = ukfs_file_size(full);
 	}
-	fprintf(stderr, "ukfsd: list '%s' inode=%p ino=%lu isize=%lld count=%d\n",
-	        path?path:"", (void*)dir, dir->i_ino, (long long)dir->i_size, g_api_dirn); fflush(stderr);
 	*out = g_api_dir;
 	return g_api_dirn;
 }
