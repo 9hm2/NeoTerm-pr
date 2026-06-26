@@ -25,7 +25,7 @@
 #include <sys/time.h>
 
 typedef unsigned long word_t;
-typedef struct { int pid; } Tracee;
+typedef struct { int pid; struct { char *cwd; } *fs; } Tracee;   /* fs->cwd: guest CWD */
 typedef enum { CURRENT, ORIGINAL, MODIFIED } RegVersion;
 typedef enum { SYSARG_1, SYSARG_2, SYSARG_3, SYSARG_4, SYSARG_5, SYSARG_6, SYSARG_RESULT } Reg;
 enum { PR_void = 0, PR_mount, PR_newfstatat, PR_fstatat64, PR_statx,
