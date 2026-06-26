@@ -125,10 +125,28 @@ static void ukfs_do_umount(void)
 	g_vmount[0] = '\0';
 }
 
-/* Perform the deferred ukfsd mount on first access (idempotent). */
+/* uknl_block_present(): true iff the io.neoterm.block server still has a device
+ * attached. Defined earlier in enter.c (the block proxy); declared here so the
+ * standalone lint build resolves it too. */
+static bool uknl_block_present(void);
+
+/* Perform the deferred ukfsd mount on first access (idempotent). A (re)mount is
+ * needed whenever g_ukfs_ready is 0 — which also happens after a socket error
+ * (ukfs_sdrop) when the pendrive is unplugged mid-session. At that point, if the
+ * backing device is gone, auto-clear the vmount so the mount point reverts to the
+ * empty host dir instead of erroring forever (the guest can't umount a device
+ * that vanished). The block-present probe is only done when a mount is pending,
+ * so it costs nothing on the steady-state mounted path. */
 static void ukfs_ensure_mounted(void)
 {
-	if (g_vmounted && !g_ukfs_ready && ukfs_do_mount() == 0) {
+	if (!g_vmounted || g_ukfs_ready)
+		return;
+	if (!uknl_block_present()) {
+		uk_dbg_line("uk_fs: device gone -> auto-umount\n");
+		ukfs_do_umount();
+		return;
+	}
+	if (ukfs_do_mount() == 0) {
 		g_ukfs_ready = 1;
 		uk_dbg_line("uk_fs: lazy ukfsd mount OK\n");
 	}
@@ -532,7 +550,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v12-dirfd UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v13-autoumount UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);

@@ -131,11 +131,22 @@ object BlockBridge {
     val gb = totalBytes / (1024.0 * 1024 * 1024)
     Kmsg.log("usb-block: /dev/uksd0 <- $id  %.1f GB  (sector %d, %d sectors)".format(gb, sectorSize, cap.first + 1))
     NLog.e(TAG, "attached $id ${totalBytes}B sector=$sectorSize")
+    // (Re)start the FS daemon — a prior detach kills it (see onDetached); a fresh
+    // ukfsd is needed so the guest can mount this newly attached device. No-op if
+    // it is already running.
+    runCatching { FsBridge.ensureReady() }
   }
 
   @Synchronized
   fun onDetached(device: UsbDevice?) {
-    if (device != null && device.deviceName == deviceName) teardown("/dev/uksd0: pendrive disconnected")
+    if (device != null && device.deviceName == deviceName) {
+      teardown("/dev/uksd0: pendrive disconnected")
+      // Tear down the FS daemon too: it holds the (now dead) mount, and killing it
+      // drops the proot redirect's io.neoterm.fs connection so the guest's next
+      // access sees the device is gone and auto-clears the /mnt mount point
+      // (otherwise it would keep showing the unplugged disk's stale contents).
+      runCatching { FsBridge.stopAll() }
+    }
   }
 
   @Synchronized
