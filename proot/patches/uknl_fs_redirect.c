@@ -587,7 +587,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v25-eperm32 UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v26-path UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -1053,17 +1053,18 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 	if (g_vmounted) {
 		int res = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);   /* 32-bit, like fake_id0 */
 		if (res == -1 || res == -13) {       /* -EPERM / -EACCES */
-			char gp[PATH_MAX], rel[PATH_MAX]; char pbuf[PATH_MAX + 8]; pbuf[0] = 0;
+			/* Print BOTH path candidates verbatim (no vmount filter): the EACCES
+			 * opens carry no vmount path, so we need to see exactly which files they
+			 * are — config-probe red herrings vs. the real culprit. arg1 (legacy
+			 * path-in-arg1) and arg2 (the *at path) are both dumped when readable. */
+			char g1[PATH_MAX], g2[PATH_MAX]; g1[0] = g2[0] = 0;
 			word_t a1 = peek_reg(tracee, ORIGINAL, SYSARG_1);
 			word_t a2 = peek_reg(tracee, ORIGINAL, SYSARG_2);
-			if (a1 && read_string(tracee, gp, a1, sizeof gp) > 0 && gp[0] == '/' &&
-			    ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel))
-				snprintf(pbuf, sizeof pbuf, " a1='%s'", gp);
-			else if (a2 && read_string(tracee, gp, a2, sizeof gp) > 0 && gp[0] == '/' &&
-			         ukfs_rel_at(tracee, (int) a1, gp, rel, sizeof rel))
-				snprintf(pbuf, sizeof pbuf, " a2='%s'", gp);
-			char l[PATH_MAX + 96];
-			snprintf(l, sizeof l, "uk_fs: EPERM-EXIT nr=%lu res=%d%s\n", (unsigned long) nr, res, pbuf);
+			if (a1 && read_string(tracee, g1, a1, sizeof g1) > 0 && g1[0] != '/') g1[0] = 0;
+			if (a2) read_string(tracee, g2, a2, sizeof g2);
+			char l[2 * PATH_MAX + 96];
+			snprintf(l, sizeof l, "uk_fs: EPERM-EXIT nr=%lu res=%d a1='%s' a2='%s'\n",
+			         (unsigned long) nr, res, g1, g2);
 			uk_dbg_line(l);
 		}
 	}
