@@ -65,8 +65,6 @@ static size_t         g_resp_blen, g_resp_bpos;
 static int uksd_wn(int s, const void *b, size_t n) { (void)s;(void)b;(void)n; return 0; }
 static int uksd_rl(int s, char *b, size_t bs) { (void)s; snprintf(b, bs, "%s", g_resp_line); return (int)strlen(b); }
 static int uksd_rn(int s, void *b, size_t n) { (void)s; if (g_resp_bpos + n > g_resp_blen) return -1; memcpy(b, g_resp_blob + g_resp_bpos, n); g_resp_bpos += n; return 0; }
-/* block-presence probe (defined in enter.c's block proxy in the real build) */
-static bool uknl_block_present(void) { return true; }
 
 #include "uknl_fs_redirect.c"   /* found via -I <repo>/proot/patches (see run_host_tests.sh) */
 

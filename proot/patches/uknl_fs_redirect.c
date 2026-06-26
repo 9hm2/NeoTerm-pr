@@ -125,10 +125,29 @@ static void ukfs_do_umount(void)
 	g_vmount[0] = '\0';
 }
 
-/* uknl_block_present(): true iff the io.neoterm.block server still has a device
- * attached. Defined earlier in enter.c (the block proxy); declared here so the
- * standalone lint build resolves it too. */
-static bool uknl_block_present(void);
+/* True iff the io.neoterm.block server still has a device attached (SIZE -> OK).
+ * Self-contained: a sibling uknl_block_present() exists in the block proxy, but
+ * it is static in another translation unit, so we re-implement the probe here.
+ * Returns 1 ("present") if the socket can't even be created (can't tell -> don't
+ * auto-umount spuriously); 0 only when the server is reachable-but-deviceless or
+ * unreachable (the pendrive is genuinely gone). */
+static int ukfs_block_present(void)
+{
+	int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (s < 0) return 1;
+	struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+	setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+	struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
+	const char *nm = "io.neoterm.block";
+	a.sun_path[0] = '\0'; strncpy(a.sun_path + 1, nm, sizeof(a.sun_path) - 2);
+	socklen_t len = sizeof(a.sun_family) + 1 + strlen(nm);
+	if (connect(s, (struct sockaddr *) &a, len) < 0) { close(s); return 0; }
+	int ok = (write(s, "SIZE\n", 5) == 5);
+	char r[8] = {0}; ssize_t n = ok ? read(s, r, sizeof r - 1) : -1;
+	close(s);
+	return n >= 2 && r[0] == 'O' && r[1] == 'K';
+}
 
 /* Perform the deferred ukfsd mount on first access (idempotent). A (re)mount is
  * needed whenever g_ukfs_ready is 0 — which also happens after a socket error
@@ -141,7 +160,7 @@ static void ukfs_ensure_mounted(void)
 {
 	if (!g_vmounted || g_ukfs_ready)
 		return;
-	if (!uknl_block_present()) {
+	if (!ukfs_block_present()) {
 		uk_dbg_line("uk_fs: device gone -> auto-umount\n");
 		ukfs_do_umount();
 		return;
