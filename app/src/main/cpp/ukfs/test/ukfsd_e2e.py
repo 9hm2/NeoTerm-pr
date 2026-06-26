@@ -128,6 +128,15 @@ cmd('RENAME %d %d' % (len(old), len(new))); s.sendall(old + new)
 check("RENAME inner.txt -> renamed.txt", line() == 'OK')
 check("LIST /sub after rename", listdir('/sub') == ['renamed.txt'])
 
+# 6b) git-style rename: LFN lock file -> 8.3 target (reproduces config.lock -> config)
+cmd('CREATE 33188 /sub/config.lock'); check("CREATE config.lock", line() == 'OK')
+cmd('WRITE 0 7 /sub/config.lock'); s.sendall(b'[core]\n'); check("WRITE config.lock", line() == 'OK 7')
+o2, n2 = b'sub/config.lock', b'sub/config'
+cmd('RENAME %d %d' % (len(o2), len(n2))); s.sendall(o2 + n2)
+check("RENAME config.lock -> config (LFN->8.3)", line() == 'OK')
+check("LIST /sub has config", 'config' in listdir('/sub'))
+cmd('UNLINK /sub/config'); line()
+
 # 7) chmod + truncate
 check("CHMOD /sub/renamed.txt", (cmd('CHMOD 420 /sub/renamed.txt'), line())[1] == 'OK')
 check("TRUNCATE /sub/renamed.txt -> 4", (cmd('TRUNCATE 4 /sub/renamed.txt'), line())[1] == 'OK')
