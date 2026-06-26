@@ -286,7 +286,9 @@ static int ukfs_create_at(const char *rel, unsigned mode)
 	int rl = snprintf(req, sizeof req, "CREATE %u %s\n", mode, rel);
 	if (uksd_wn(s, req, rl) < 0) { ukfs_sdrop(); return -1; }
 	char line[32]; if (uksd_rl(s, line, sizeof line) < 0) { ukfs_sdrop(); return -1; }
-	return (line[0] == 'O' && line[1] == 'K') ? 0 : -1;
+	if (line[0] == 'O' && line[1] == 'K') return 0;
+	{ char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: CREATE '%s' FAIL reply='%s'\n", rel, line); uk_dbg_line(l); }
+	return -1;
 }
 
 /* WRITE <off> <len> <path> + payload: bytes written, or -1. */
@@ -297,7 +299,10 @@ static long ukfs_write_at(const char *rel, long long off, const void *buf, size_
 	int rl = snprintf(req, sizeof req, "WRITE %lld %zu %s\n", off, len, rel);
 	if (uksd_wn(s, req, rl) < 0 || uksd_wn(s, buf, len) < 0) { ukfs_sdrop(); return -1; }
 	char line[64]; if (uksd_rl(s, line, sizeof line) < 0) { ukfs_sdrop(); return -1; }
-	long n; if (sscanf(line, "OK %ld", &n) != 1) return -1;
+	long n; if (sscanf(line, "OK %ld", &n) != 1) {
+		char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: WRITE '%s' FAIL reply='%s'\n", rel, line); uk_dbg_line(l);
+		return -1;
+	}
 	return n;
 }
 
@@ -311,6 +316,7 @@ static int ukfs_simple(const char *prefix, const char *rel)
 	if (uksd_wn(s, req, rl) < 0) { ukfs_sdrop(); return -1; }
 	char line[64]; if (uksd_rl(s, line, sizeof line) < 0) { ukfs_sdrop(); return -1; }
 	if (line[0] == 'O' && line[1] == 'K') return 0;
+	{ char l[PATH_MAX + 128]; snprintf(l, sizeof l, "uk_fs: '%s%s' FAIL reply='%s'\n", prefix, rel, line); uk_dbg_line(l); }
 	int e; return (sscanf(line, "ERR %d", &e) == 1) ? -e : -1;
 }
 
@@ -323,6 +329,7 @@ static int ukfs_two_path(const char *cmd, const char *a, const char *b)
 	if (uksd_wn(s, req, rl) < 0 || uksd_wn(s, a, al) < 0 || uksd_wn(s, b, bl) < 0) { ukfs_sdrop(); return -1; }
 	char line[64]; if (uksd_rl(s, line, sizeof line) < 0) { ukfs_sdrop(); return -1; }
 	if (line[0] == 'O' && line[1] == 'K') return 0;
+	{ char l[2 * PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: %s FAIL reply='%s' a='%s' b='%s'\n", cmd, line, a, b); uk_dbg_line(l); }
 	int e; return (sscanf(line, "ERR %d", &e) == 1) ? -e : -1;
 }
 
@@ -580,7 +587,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v22-diag2 UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v23-reply UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -1012,26 +1019,17 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	 * so a culprit that passes the path by fd/relative form still shows up. */
 	{
 		char gp[PATH_MAX], rel[PATH_MAX];
-		const char *cwd = (tracee->fs && tracee->fs->cwd) ? tracee->fs->cwd : "";
-		int cwd_in = ukfs_rel(cwd, rel, sizeof rel);
 		word_t a1 = peek_reg(tracee, CURRENT, SYSARG_1);
 		word_t a2 = peek_reg(tracee, CURRENT, SYSARG_2);
-		int logged = 0;
 		if (a1 && read_string(tracee, gp, a1, sizeof gp) > 0 && gp[0] &&
 		    ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) {
 			char l[PATH_MAX + 96];
 			snprintf(l, sizeof l, "uk_fs: UNHANDLED nr=%lu a1='%s' rel='%s'\n", (unsigned long) nr, gp, rel);
-			uk_dbg_line(l); logged = 1;
-		}
-		if (!logged && a2 && read_string(tracee, gp, a2, sizeof gp) > 0 && gp[0] &&
-		    ukfs_rel_at(tracee, (int) a1, gp, rel, sizeof rel)) {
+			uk_dbg_line(l);
+		} else if (a2 && read_string(tracee, gp, a2, sizeof gp) > 0 && gp[0] &&
+		           ukfs_rel_at(tracee, (int) a1, gp, rel, sizeof rel)) {
 			char l[PATH_MAX + 96];
 			snprintf(l, sizeof l, "uk_fs: UNHANDLED nr=%lu a2='%s' rel='%s'\n", (unsigned long) nr, gp, rel);
-			uk_dbg_line(l); logged = 1;
-		}
-		if (!logged && cwd_in) {
-			char l[96];
-			snprintf(l, sizeof l, "uk_fs: UNHANDLED nr=%lu (cwd in vmount, no path arg)\n", (unsigned long) nr);
 			uk_dbg_line(l);
 		}
 	}
