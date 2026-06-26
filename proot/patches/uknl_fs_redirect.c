@@ -361,6 +361,34 @@ static struct ukfs_vfd *vfd_alloc(void)
 }
 static void vfd_free(struct ukfs_vfd *v) { if (v) { free(v->dents); memset(v, 0, sizeof *v); } }
 
+/* Pending-result table: for path syscalls I PR_void at sysENTER (renameat,
+ * mkdirat, unlinkat, …), proot's PR_void result-restoration does NOT reliably
+ * deliver the poked result to the tracee on aarch64 — the value is clobbered
+ * before the tracee resumes (rename poke=0 was observed arriving at git as -1).
+ * fd-based ops (read/write/stat) are unaffected (they are FILTER_SYSEXIT). So we
+ * record the intended result here at enter and authoritatively RE-POKE it from
+ * uknl_fs_exit_final, which runs at the very end of translate_syscall_exit (after
+ * fake_id0's SYSCALL_EXIT_END). One syscall is in flight per tracee, so a single
+ * slot per pid suffices. */
+static struct { int used, pid; word_t nr; long res; } g_pend_res[128];
+static void pend_res_set(int pid, word_t nr, long res)
+{
+	int i, fr = -1;
+	for (i = 0; i < 128; i++) {
+		if (g_pend_res[i].used) { if (g_pend_res[i].pid == pid) { g_pend_res[i].nr = nr; g_pend_res[i].res = res; return; } }
+		else if (fr < 0) fr = i;
+	}
+	if (fr >= 0) { g_pend_res[fr].used = 1; g_pend_res[fr].pid = pid; g_pend_res[fr].nr = nr; g_pend_res[fr].res = res; }
+}
+static int pend_res_take(int pid, word_t nr, long *res)
+{
+	for (int i = 0; i < 128; i++)
+		if (g_pend_res[i].used && g_pend_res[i].pid == pid && g_pend_res[i].nr == nr) {
+			*res = g_pend_res[i].res; g_pend_res[i].used = 0; return 1;
+		}
+	return 0;
+}
+
 static void open_pending_set(int pid, int isdir, const char *path)
 {
 	int i;
@@ -588,7 +616,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v28-final UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v29-repoke UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -902,14 +930,17 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (!ukfs_rel_at(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1), gp, rel, sizeof rel)) return false;
 		unsigned mode = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3) & 07777;
 		char pfx[48]; snprintf(pfx, sizeof pfx, "MKDIR %u ", mode);
-		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_simple(pfx, rel)); set_sysnum(tracee, PR_void); return true;
+		long r = ukfs_simple(pfx, rel);
+		pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_unlinkat) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
 		if (!ukfs_rel_at(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1), gp, rel, sizeof rel)) return false;
 		int flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
-		int r = ukfs_simple((flags & 0x200) ? "RMDIR " : "UNLINK ", rel);   /* AT_REMOVEDIR */
+		long r = ukfs_simple((flags & 0x200) ? "RMDIR " : "UNLINK ", rel);   /* AT_REMOVEDIR */
+		pend_res_set(tracee->pid, nr, r);
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_symlinkat) {
@@ -919,7 +950,9 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (!ta || read_string(tracee, target, ta, sizeof target) <= 0) return false;
 		if (!la || read_string(tracee, lp, la, sizeof lp) <= 0) return false;
 		if (!ukfs_rel_at(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_2), lp, rel, sizeof rel)) return false;
-		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_two_path("SYMLINK", target, rel)); set_sysnum(tracee, PR_void); return true;
+		long r = ukfs_two_path("SYMLINK", target, rel);
+		pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_fchmodat) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2); char gp[PATH_MAX], rel[PATH_MAX];
@@ -927,7 +960,9 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (!ukfs_rel_at(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1), gp, rel, sizeof rel)) return false;
 		unsigned mode = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3) & 07777;
 		char pfx[48]; snprintf(pfx, sizeof pfx, "CHMOD %u ", mode);
-		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_simple(pfx, rel)); set_sysnum(tracee, PR_void); return true;
+		long r = ukfs_simple(pfx, rel);
+		pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_fchownat) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2); char gp[PATH_MAX], rel[PATH_MAX];
@@ -936,7 +971,9 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		unsigned uid = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3);
 		unsigned gid = (unsigned) peek_reg(tracee, CURRENT, SYSARG_4);
 		char pfx[64]; snprintf(pfx, sizeof pfx, "CHOWN %u %u ", uid, gid);
-		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_simple(pfx, rel)); set_sysnum(tracee, PR_void); return true;
+		long r = ukfs_simple(pfx, rel);
+		pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_truncate) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
@@ -944,7 +981,9 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
 		long long sz = (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_2);
 		char pfx[48]; snprintf(pfx, sizeof pfx, "TRUNCATE %lld ", sz);
-		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_simple(pfx, rel)); set_sysnum(tracee, PR_void); return true;
+		long r = ukfs_simple(pfx, rel);
+		pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_renameat || nr == PR_renameat2) {
 		word_t oa = peek_reg(tracee, CURRENT, SYSARG_2);
@@ -961,6 +1000,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		}
 		long rr = ukfs_two_path("RENAME", orel, nrel);
 		{ char l[2 * PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: RENAME poke=%ld o='%s' n='%s'\n", rr, orel, nrel); uk_dbg_line(l); }
+		pend_res_set(tracee->pid, nr, rr);
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) rr); set_sysnum(tracee, PR_void); return true;
 	}
 
@@ -1050,15 +1090,23 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
  * poke. Log the FINAL result git actually receives for rename/close/open under
  * the vmount — rename always, others only on error — to settle whether the
  * config commit's rename/close is delivered as 0 or mangled to -EPERM. */
+/* Authoritatively deliver the result of a PR_void'd write-path syscall. proot's
+ * own PR_void restoration clobbers the poked value before the tracee resumes on
+ * aarch64 (observed: rename poke=0 -> git receives -1), so re-poke the intended
+ * result here, at the very end of translate_syscall_exit. Runs after fake_id0's
+ * SYSCALL_EXIT_END, so nothing overwrites it afterwards. */
 void uknl_fs_exit_final(Tracee *tracee, word_t nr);
 void uknl_fs_exit_final(Tracee *tracee, word_t nr)
 {
 	if (!uk_fs_on() || !g_vmounted) return;
-	int res = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
-	if (nr == PR_renameat || nr == PR_renameat2) {
-		char l[96]; snprintf(l, sizeof l, "uk_fs: EXIT-FINAL rename res=%d\n", res); uk_dbg_line(l);
-	} else if ((nr == PR_close || nr == PR_openat || nr == PR_openat2) && res < 0) {
-		char l[96]; snprintf(l, sizeof l, "uk_fs: EXIT-FINAL nr=%lu res=%d\n", (unsigned long) nr, res); uk_dbg_line(l);
+	long want;
+	if (pend_res_take(tracee->pid, nr, &want)) {
+		int cur = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+		if (cur != (int) want) {
+			poke_reg(tracee, SYSARG_RESULT, (word_t)(long) want);
+			char l[96]; snprintf(l, sizeof l, "uk_fs: REPOKE nr=%lu %d->%ld\n", (unsigned long) nr, cur, want);
+			uk_dbg_line(l);
+		}
 	}
 }
 
