@@ -630,7 +630,15 @@ static void ukfs_put_stat(Tracee *tracee, word_t addr, unsigned mode, unsigned u
 	memcpy(st + 88, &mt_s,       8);   /* st_mtime.tv_sec  */
 	memcpy(st + 104, &ct_s,      8);   /* st_ctime.tv_sec  */
 #endif
-	write_data(tracee, addr, st, sizeof st);
+	/* CRITICAL: write EXACTLY the guest struct stat size. aarch64's struct stat is
+	 * 128 B; writing the full 144 B buffer overflows the guest's (often stack-
+	 * allocated) struct by 16 B -> "stack smashing detected" in cat/df/ls -l. Only
+	 * x86_64 (the host test build) actually uses the 144 B layout. */
+#if defined(__x86_64__)
+	write_data(tracee, addr, st, 144);
+#else
+	write_data(tracee, addr, st, 128);
+#endif
 }
 
 /* struct statx (256 B) — kernel uapi layout. */
