@@ -323,6 +323,16 @@ object ProotManager {
     // PulseAudio TCP-n. Ártalmatlan CLI-használatnál is (a nem-GUI appok nem
     // nyúlnak hozzá).
     args.add("DISPLAY=:0")
+    // Qt/GUI on the embedded X server (lorie) has no hardware OpenGL/GLX, so Qt5/6
+    // apps (rpi-imager, gnome-disks-style tools, any QtQuick GUI) must render in
+    // software and not try to bring up a GLX/EGL context — otherwise they exit with
+    // no window ("Could not load the Qt platform plugin" / silent GL failure).
+    // Default these so such apps work out of the box; non-Qt/CLI apps ignore them.
+    args.add("QT_QUICK_BACKEND=software")
+    args.add("QT_XCB_GL_INTEGRATION=none")
+    // Mesa software rasteriser fallback for plain OpenGL apps (llvmpipe) — harmless
+    // when GL isn't used; lets GL tools run instead of failing to find a GPU.
+    args.add("LIBGL_ALWAYS_SOFTWARE=1")
     args.add("PULSE_SERVER=127.0.0.1:4713")
     // Default recording source: NeoTerm's Android-side microphone (AAudio
     // input). Only exported when the user enabled the microphone in Settings —
