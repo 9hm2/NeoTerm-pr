@@ -395,6 +395,7 @@ printf 'label: dos\nstart=2048, type=83\n' | sfdisk "$W/mk.img" >/dev/null 2>&1
 LN=\$("$W/loopmnt" "$W/mk.img" - 1 | sed -n 's/.*LOOPN=//p')
 echo "  mkfs target loop=\$LN"
 [ -n "\$LN" ] || fail "loopmnt config-only"
+[ -b "/dev/loop\${LN}p1" ] || fail "loop node not seen as block device (stat S_IFBLK)"
 mkfs.ext4 -q -F "/dev/loop\${LN}p1" 2>/dev/null || fail "mkfs.ext4 on /dev/loop\${LN}p1"
 mkdir -p "$W/lmpm"
 mount "/dev/loop\${LN}p1" "$W/lmpm" || fail "mount freshly-mkfs'd loop partition"

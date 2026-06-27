@@ -458,6 +458,17 @@ static int ukfs_src_mountable(const char *src)
 	return ukfs_loop_resolve(src, img, sizeof img, &b, &s);
 }
 
+/* Effective byte size of a configured loop node (whole or partition), or -1 if the
+ * path isn't a configured loop. Used to present the node as a block device. */
+static long long ukfs_loop_node_size(const char *gpath)
+{
+	char img[600]; long long base = 0, size = 0;
+	if (!ukfs_loop_resolve(gpath, img, sizeof img, &base, &size)) return -1;
+	if (size > 0) return size;
+	struct stat ist; if (stat(img, &ist) == 0) return (long long) ist.st_size - base;
+	return -1;
+}
+
 /* ===== raw I/O on a /dev/loopN[pM] node =====
  * So blkid/file/fdisk/dd and bare `mount` (auto fstype) work on a loop device just
  * like a real PC: reads/writes of the loop node are served from the backing host
@@ -1307,6 +1318,38 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	 * (blkid/file/fdisk/dd and bare `mount` auto-detect). Before the g_nm guard:
 	 * blkid reads the loop device before any mount exists. */
 	if (ukfs_loopfd_op(tracee, nr)) return true;
+
+	/* stat of a /dev/loopN[pM] node -> report a BLOCK device (S_IFBLK). Otherwise
+	 * tools see a regular-file marker: `mount /dev/loop0p1` would try to loop-mount
+	 * the marker itself instead of mounting the partition, and mkfs/losetup misjudge
+	 * it. Path forms (stat/lstat/newfstatat/statx) and fstat(fd) both covered. */
+	if (g_lo_any && (nr == PR_newfstatat || nr == PR_fstatat64 || nr == PR_statx ||
+	                 nr == PR_stat || nr == PR_lstat || nr == PR_stat64 || nr == PR_lstat64 || nr == PR_fstat)) {
+		long long lsz = -1; word_t stbuf = 0; int is_x = 0;
+		if (nr == PR_fstat) {
+			int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+			char lk[64], pp[PATH_MAX]; snprintf(lk, sizeof lk, "/proc/%d/fd/%d", tracee->pid, fd);
+			ssize_t pn = readlink(lk, pp, sizeof pp - 1);
+			if (pn > 0) { pp[pn] = '\0'; lsz = ukfs_loop_node_size(pp); }
+			stbuf = peek_reg(tracee, CURRENT, SYSARG_2);
+		} else {
+			int patharg = (nr == PR_stat || nr == PR_lstat || nr == PR_stat64 || nr == PR_lstat64) ? SYSARG_1 : SYSARG_2;
+			word_t pa = peek_reg(tracee, CURRENT, patharg);
+			char gp[PATH_MAX];
+			if (pa && read_string(tracee, gp, pa, sizeof gp) > 0) lsz = ukfs_loop_node_size(gp);
+			is_x = (nr == PR_statx);
+			stbuf = is_x ? peek_reg(tracee, CURRENT, SYSARG_5)
+			      : (nr == PR_newfstatat || nr == PR_fstatat64) ? peek_reg(tracee, CURRENT, SYSARG_3)
+			      : peek_reg(tracee, CURRENT, SYSARG_2);
+		}
+		if (lsz >= 0) {
+			/* S_IFBLK | 0660, sd-like rdev 8:0 */
+			if (is_x) ukfs_put_statx(tracee, stbuf, 0060660, 0, 0, (long) lsz, 0xb10c0, 0, 0, 1, (8UL << 8), (unsigned long)(lsz / 512));
+			else      ukfs_put_stat (tracee, stbuf, 0060660, 0, 0, (long) lsz, 0xb10c0, 0, 0, 1, (8UL << 8), (unsigned long)(lsz / 512));
+			pend_res_set(tracee->pid, nr, 0);
+			poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
+		}
+	}
 
 	/* mount(2) on the NORMAL path (non-Android, where mount isn't SIGSYS-blocked):
 	 * register the vmount and fake success. The actual ukfsd MOUNT is deferred to
