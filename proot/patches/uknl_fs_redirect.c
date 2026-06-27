@@ -181,6 +181,15 @@ static struct ukfch *fch_resolve(Tracee *tracee, int fd)
 	int tg = ukfs_tgid(tracee->pid);
 	struct ukfch *ch = fch_by_fd(tg, fd);
 	if (ch) return ch;
+	/* Fast path: only pay for the readlink()-based fork adoption if SOME channel
+	 * actually uses this fd number (rare). Otherwise this is an ordinary read/write
+	 * on a non-FUSE fd — return immediately, no syscall. Without this, every
+	 * read/write system-wide would do a readlink while a FUSE mount is active,
+	 * which times out heavy /sys scanners like lsblk. */
+	int maybe = 0;
+	for (int i = 0; i < UK_NFCH; i++)
+		if (g_fch[i].used && g_fch[i].eng && g_fch[i].fd == fd) { maybe = 1; break; }
+	if (!maybe) return NULL;
 	char pp[256]; fch_fdpath(tracee->pid, fd, pp, sizeof pp);
 	if (!pp[0]) return NULL;
 	for (int i = 0; i < UK_NFCH; i++)
