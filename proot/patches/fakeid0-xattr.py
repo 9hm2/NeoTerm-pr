@@ -1048,6 +1048,24 @@ if 'uknl_pump_one' not in s:
                   '\t\t(void) restart_tracee(tracee, signal);', 1)
     wr(EV, s)
 
+# ---- tracee/tracee.c: note fork/clone so a FUSE channel follows a daemonizing
+#      server to its forked child. Several /dev/fuse mounts share the same marker,
+#      so once the parent exits, marker-path adoption can't tell the channels
+#      apart; recording the fork at creation time (parent alive) keeps each daemon
+#      mapped to its own channel. ----
+TC = ROOT + "/tracee/tracee.c"; s = rd(TC)
+if 'uknl_fuse_note_fork' not in s:
+    nc_anchor = ('\tchild = get_tracee(parent, (pid_t) pid, true);\n'
+                 '\tif (child == NULL) {\n'
+                 '\t\tnote(parent, WARNING, SYSTEM, "running out of memory");\n'
+                 '\t\treturn -ENOMEM;\n'
+                 '\t}')
+    must(nc_anchor in s, "tracee.c new_child get_tracee anchor (fuse fork)")
+    s = s.replace(nc_anchor, nc_anchor +
+                  '\n\n\t/* NeoTerm FUSE: keep a daemonizing server\'s channel mapped to its child. */\n'
+                  '\t{ extern void uknl_fuse_note_fork(int ppid, int cpid); uknl_fuse_note_fork(parent->pid, (int) pid); }', 1)
+    wr(TC, s)
+
 # ---- syscall/exit.c: capture the fd returned by a redirected openat so reads/
 #      getdents/lseek on it can be proxied (uknl_fs_open_exit lives in enter.c). ----
 EX = ROOT + "/syscall/exit.c"; s = rd(EX)

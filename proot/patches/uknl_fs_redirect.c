@@ -114,6 +114,15 @@ static struct ukfch g_fch[UK_NFCH];
 static int g_fopen_tid[UK_NFCH];          /* this thread's open() is for /dev/fuse */
 static int ukfs_tgid(int tid);            /* fwd (defined below) */
 
+/* Fork hints: child-pid -> channel index. A FUSE daemon usually daemonizes
+ * (fork; parent exits; the CHILD runs the session loop on the inherited /dev/fuse
+ * fd). Several mounts bind the SAME /dev/fuse marker, so once the parent is gone
+ * the marker path can't tell the channels apart. We instead record the fork at
+ * fork time (parent still alive, see uknl_fuse_note_fork) so the child resolves to
+ * the right channel. */
+#define UK_NFORK 64
+static struct { int used, pid, chan; } g_fch_fork[UK_NFORK];
+
 /* One-step event-loop pump (injected into tracee/event.c): handle one other
  * tracee's stop. Used to let an accessor wait while the FUSE daemon runs. Returns
  * 0, or -1 if there are no more children. */
@@ -225,6 +234,43 @@ static struct ukfch *fch_by_fd(int pid, int fd)
 	return NULL;
 }
 
+/* Channel index owned by tgid `pid` — directly, or via a recorded fork hint. */
+static int fch_chan_of_pid(int pid)
+{
+	for (int i = 0; i < UK_NFCH; i++)
+		if (g_fch[i].used && g_fch[i].eng && g_fch[i].pid == pid) return i;
+	for (int i = 0; i < UK_NFORK; i++)
+		if (g_fch_fork[i].used && g_fch_fork[i].pid == pid) return g_fch_fork[i].chan;
+	return -1;
+}
+
+/* Drop every fork hint for channel index `c` (called when the channel is torn
+ * down or its slot reused, so a stale hint can't mis-adopt a later process). */
+static void fch_forget_forks(int c)
+{
+	for (int i = 0; i < UK_NFORK; i++)
+		if (g_fch_fork[i].used && g_fch_fork[i].chan == c) g_fch_fork[i].used = 0;
+}
+
+/* A traced process forked. If the parent owns (or inherited) a FUSE channel, the
+ * child inherits its /dev/fuse fd; record child->channel so the child resolves to
+ * the RIGHT channel later — marker-path matching can't disambiguate several mounts
+ * that share the /dev/fuse marker. Injected into proot's new_child(). */
+void uknl_fuse_note_fork(int ppid, int cpid);
+void uknl_fuse_note_fork(int ppid, int cpid)
+{
+	int c = fch_chan_of_pid(ppid);
+	if (c < 0) c = fch_chan_of_pid(ukfs_tgid(ppid));
+	if (c < 0) return;
+	int slot = -1;
+	for (int i = 0; i < UK_NFORK; i++) {
+		if (g_fch_fork[i].used && g_fch_fork[i].pid == cpid) { slot = i; break; }
+		if (slot < 0 && !g_fch_fork[i].used) slot = i;
+	}
+	if (slot < 0) slot = 0;                 /* table full: clobber the first slot */
+	g_fch_fork[slot].used = 1; g_fch_fork[slot].pid = cpid; g_fch_fork[slot].chan = c;
+}
+
 /* True iff `pid` belongs to a FUSE daemon's thread group (it owns a channel).
  * The re-entrant pump (fch_recv) must advance ONLY the daemon while an accessor
  * waits for a reply; every OTHER tracee's stop is deferred to the real event loop,
@@ -251,9 +297,10 @@ static void fch_fdpath(int tid, int fd, char *out, size_t cap)
 }
 
 /* Find the channel for a daemon's /dev/fuse fd, tolerating fork/daemonization:
- * a forked child inherits the fd (same number, same underlying open file, hence
- * the same resolved marker path) but has a new tgid. Match by (tgid,fd) first,
- * else by the fd's resolved marker path and ADOPT the channel to this tgid. */
+ * a forked child inherits the fd but has a new tgid. Match by (tgid,fd) first;
+ * else by a fork hint recorded when the daemon forked (the reliable way to tell
+ * apart several mounts that share the /dev/fuse marker). A daemon whose channel
+ * is gone resolves to nothing and reads the real (empty) marker -> natural EOF. */
 static struct ukfch *fch_resolve(Tracee *tracee, int fd)
 {
 	int tg = ukfs_tgid(tracee->pid);
@@ -268,14 +315,23 @@ static struct ukfch *fch_resolve(Tracee *tracee, int fd)
 	for (int i = 0; i < UK_NFCH; i++)
 		if (g_fch[i].used && g_fch[i].eng && g_fch[i].fd == fd) { maybe = 1; break; }
 	if (!maybe) return NULL;
-	char pp[256]; fch_fdpath(tracee->pid, fd, pp, sizeof pp);
-	if (!pp[0]) return NULL;
-	for (int i = 0; i < UK_NFCH; i++)
-		if (g_fch[i].used && g_fch[i].eng && g_fch[i].marker[0] && strcmp(g_fch[i].marker, pp) == 0) {
-			char l[80]; snprintf(l, sizeof l, "uk_fs: fuse adopt fd=%d pid=%d (fork)\n", fd, tg); uk_dbg_line(l);
-			g_fch[i].pid = tg; g_fch[i].fd = fd;   /* adopt to the forked server */
-			return &g_fch[i];
+	/* Fork hint first: the reliable disambiguator when several mounts share the
+	 * /dev/fuse marker. Recorded at fork time, so it survives the parent's exit. */
+	for (int i = 0; i < UK_NFORK; i++)
+		if (g_fch_fork[i].used && (g_fch_fork[i].pid == tg || g_fch_fork[i].pid == tracee->pid)) {
+			int c = g_fch_fork[i].chan;
+			if (c >= 0 && g_fch[c].used && g_fch[c].eng && g_fch[c].fd == fd) {
+				char l[80]; snprintf(l, sizeof l, "uk_fs: fuse adopt fd=%d pid=%d (fork hint)\n", fd, tg); uk_dbg_line(l);
+				g_fch[c].pid = tg; return &g_fch[c];
+			}
 		}
+	/* No channel: the fork hint is authoritative (every fork is recorded at fork
+	 * time by uknl_fuse_note_fork). We deliberately do NOT fall back to marker-path
+	 * matching: with several mounts sharing the /dev/fuse marker it's ambiguous, and
+	 * a just-unmounted mount's dying daemon could otherwise re-adopt a surviving
+	 * channel and corrupt it. A daemon whose channel is gone returns NULL here, so
+	 * its read runs on the real (empty) marker file and gets a natural EOF — exactly
+	 * what makes it leave its session loop and exit. */
 	return NULL;
 }
 
@@ -335,6 +391,7 @@ static void uknl_fuse_open_exit(Tracee *tracee)
 	if (!ch) return;
 	if (ch->eng) fused_destroy(ch->eng);
 	for (int i = 0; i < UK_FQ; i++) { free(ch->rq[i].buf); free(ch->rp[i].buf); }
+	fch_forget_forks((int)(ch - g_fch));               /* drop any stale hints for this slot */
 	memset(ch, 0, sizeof *ch);
 	ch->eng = fused_new(-1, 0, 0);                     /* fd unused: io is the channel */
 	if (!ch->eng) { memset(ch, 0, sizeof *ch); return; }
@@ -523,6 +580,7 @@ static void ukfs_unmount_slot(int i)
 			fch_resume_eof(&g_fch[ci]);
 			for (int k = 0; k < UK_FQ; k++) { free(g_fch[ci].rq[k].buf); free(g_fch[ci].rp[k].buf); }
 			memset(&g_fch[ci], 0, sizeof g_fch[ci]);
+			fch_forget_forks(ci);
 		}
 		memset(&g_m[i], 0, sizeof g_m[i]); g_m[i].sock = -1;
 		if (g_nm > 0) g_nm--;
