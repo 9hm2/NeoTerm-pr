@@ -49,6 +49,7 @@ struct ukm {
 static struct ukm g_m[UK_MAXM];
 static int g_nm = 0;             /* number of registered mounts */
 static int g_am = -1;            /* active mount index (set before each request) */
+static int ukfs_tgid(int tid);   /* fwd (defined below) */
 
 /* Pool of ukfsd daemon sockets (FsBridge launches one ukfsd per name). ukfsd is
  * single-mount per process, so each live mount (a USB partition OR a loop image)
@@ -245,6 +246,7 @@ static int ukfs_umount_target(const char *tgt)
 #define UK_NLOOP 8
 struct uklo { int used; char img[600]; long long off, sizelimit; int partscan; };
 static struct uklo g_lo[UK_NLOOP];
+static int g_lo_any = 0;        /* fast-path: any loop currently configured? */
 
 /* Connect to an arbitrary ukfsd daemon socket (one-shot queries). fd or -1. */
 static int ukfs_dconn(const char *fsname)
@@ -387,7 +389,7 @@ static bool ukfs_loop_ioctl(Tracee *tracee)
 		char ip[PATH_MAX];
 		if (!ukfs_fd_hostpath(tracee, (int) arg, ip, sizeof ip)) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EBADF); set_sysnum(tracee, PR_void); return true; }
 		L->used = 1; L->off = 0; L->sizelimit = 0; L->partscan = 0;
-		snprintf(L->img, sizeof L->img, "%s", ip);
+		snprintf(L->img, sizeof L->img, "%s", ip); g_lo_any = 1;
 		{ char l[PATH_MAX + 64]; snprintf(l, sizeof l, "uk_fs: LOOP_SET_FD loop%d <- %s\n", n, ip); uk_dbg_line(l); }
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
@@ -399,7 +401,7 @@ static bool ukfs_loop_ioctl(Tracee *tracee)
 		memcpy(&off, cfg + 32, 8); memcpy(&szl, cfg + 40, 8); memcpy(&flags, cfg + 60, 4);
 		char ip[PATH_MAX];
 		if (!ukfs_fd_hostpath(tracee, (int) imgfd, ip, sizeof ip)) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EBADF); set_sysnum(tracee, PR_void); return true; }
-		L->used = 1; snprintf(L->img, sizeof L->img, "%s", ip);
+		L->used = 1; g_lo_any = 1; snprintf(L->img, sizeof L->img, "%s", ip);
 		L->off = (long long) off; L->sizelimit = (long long) szl; L->partscan = (flags & UK_LO_FLAGS_PARTSCAN) ? 1 : 0;
 		{ char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: LOOP_CONFIGURE loop%d <- %s off=%llu szl=%llu ps=%d\n", n, ip, off, szl, L->partscan); uk_dbg_line(l); }
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
@@ -454,6 +456,82 @@ static int ukfs_src_mountable(const char *src)
 	if (ukfs_src_is_dev(src)) return 1;
 	char img[600]; long long b, s;
 	return ukfs_loop_resolve(src, img, sizeof img, &b, &s);
+}
+
+/* ===== raw I/O on a /dev/loopN[pM] node =====
+ * So blkid/file/fdisk/dd and bare `mount` (auto fstype) work on a loop device just
+ * like a real PC: reads/writes of the loop node are served from the backing host
+ * image at the loop's byte range. Tracked per open fd. */
+struct uklofd { int used, pid, fd, hostfd; long long base, size, cur; };
+static struct uklofd g_lofd[64];
+
+static struct uklofd *uklofd_find(int pid, int fd)
+{
+	for (int i = 0; i < 64; i++) if (g_lofd[i].used && g_lofd[i].pid == pid && g_lofd[i].fd == fd) return &g_lofd[i];
+	return NULL;
+}
+/* If `gpath` is a configured loop node, open its backing image and remember the
+ * fd→(image range) mapping so subsequent raw I/O is served from the image. */
+static void uklofd_record(Tracee *tracee, int fd, const char *gpath)
+{
+	if (!g_lo_any) return;
+	int part; if (ukfs_loop_parse(gpath, &part) < 0) return;
+	char img[600]; long long base = 0, size = 0;
+	if (!ukfs_loop_resolve(gpath, img, sizeof img, &base, &size)) return;
+	int hf = open(img, O_RDWR | O_CLOEXEC); if (hf < 0) hf = open(img, O_RDONLY | O_CLOEXEC);
+	if (hf < 0) return;
+	int pid = ukfs_tgid(tracee->pid);
+	struct uklofd *e = uklofd_find(pid, fd); if (e) { close(e->hostfd); }
+	else { for (int i = 0; i < 64; i++) if (!g_lofd[i].used) { e = &g_lofd[i]; break; } }
+	if (!e) { close(hf); return; }
+	e->used = 1; e->pid = pid; e->fd = fd; e->hostfd = hf; e->base = base; e->size = size; e->cur = 0;
+	/* Make the bound marker REPORT the loop's size: tools (blkid/dd/fdisk/`mount`
+	 * auto-detect) fstat the node and read only up to st_size — a 0-byte marker
+	 * reads as empty. Size it to the loop range (sizelimit, or image_size - base);
+	 * raw reads are then served from the image by ukfs_loopfd_op. */
+	long long marklen = size;
+	if (marklen <= 0) { struct stat ist; if (fstat(hf, &ist) == 0) marklen = (long long) ist.st_size - base; }
+	if (marklen > 0) { int mf = open(gpath, O_RDWR); if (mf >= 0) { (void) ftruncate(mf, (off_t) marklen); close(mf); } e->size = marklen; }
+}
+/* Serve read/pread/write/pwrite/lseek/close on a loop-node fd. Returns true if handled. */
+static bool ukfs_loopfd_op(Tracee *tracee, word_t nr)
+{
+	if (!g_lo_any) return false;
+	if (nr != PR_read && nr != PR_pread64 && nr != PR_write && nr != PR_pwrite64 &&
+	    nr != PR_lseek && nr != PR_close) return false;
+	int pid = ukfs_tgid(tracee->pid);
+	int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+	struct uklofd *e = uklofd_find(pid, fd);
+	if (!e) return false;
+	long long avail = e->size;   /* sizelimit; 0 = to end of image */
+	if (nr == PR_close) { close(e->hostfd); e->used = 0; return false; }  /* free, but let real close run */
+	if (nr == PR_lseek) {
+		long long off = (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_2);
+		int whence = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+		long long np = (whence == 1) ? e->cur + off : (whence == 2 && avail > 0) ? avail + off : off;
+		if (np < 0) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - 22); set_sysnum(tracee, PR_void); return true; }
+		e->cur = np; poke_reg(tracee, SYSARG_RESULT, (word_t) np); set_sysnum(tracee, PR_void); return true;
+	}
+	int isread = (nr == PR_read || nr == PR_pread64);
+	long long pos = (nr == PR_pread64 || nr == PR_pwrite64) ? (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_4) : e->cur;
+	size_t len = (size_t) peek_reg(tracee, CURRENT, SYSARG_3);
+	word_t ubuf = peek_reg(tracee, CURRENT, SYSARG_2);
+	if (avail > 0 && pos + (long long) len > avail) len = (pos < avail) ? (size_t)(avail - pos) : 0;
+	if (len > (8u << 20)) len = 8u << 20;
+	if (len == 0) { poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true; }
+	void *tmp = malloc(len); if (!tmp) return false;
+	long r;
+	if (isread) {
+		r = pread(e->hostfd, tmp, len, (off_t)(e->base + pos));
+		if (r > 0) write_data(tracee, ubuf, tmp, (size_t) r);
+	} else {
+		if (read_data(tracee, tmp, ubuf, len) < 0) { free(tmp); poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - 14); set_sysnum(tracee, PR_void); return true; }
+		r = pwrite(e->hostfd, tmp, len, (off_t)(e->base + pos));
+	}
+	free(tmp);
+	if (r < 0) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - 5); set_sysnum(tracee, PR_void); return true; }
+	if (nr == PR_read || nr == PR_write) e->cur = pos + r;
+	poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 }
 
 /* True iff the io.neoterm.block server still has a device attached (SIZE -> OK).
@@ -1155,7 +1233,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v48-loop UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v49-loop UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -1176,6 +1254,10 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	/* loop device ioctls (losetup / mount -o loop) — handled before the g_nm guard
 	 * since losetup runs BEFORE any filesystem is mounted. */
 	if (nr == PR_ioctl && ukfs_loop_ioctl(tracee)) return true;
+	/* raw read/write/lseek on a /dev/loopN[pM] node -> serve from the backing image
+	 * (blkid/file/fdisk/dd and bare `mount` auto-detect). Before the g_nm guard:
+	 * blkid reads the loop device before any mount exists. */
+	if (ukfs_loopfd_op(tracee, nr)) return true;
 
 	/* mount(2) on the NORMAL path (non-Android, where mount isn't SIGSYS-blocked):
 	 * register the vmount and fake success. The actual ukfsd MOUNT is deferred to
@@ -1995,6 +2077,17 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 			snprintf(l, sizeof l, "uk_fs: EPERM-EXIT nr=%lu res=%d a1='%s' a2='%s'\n",
 			         (unsigned long) nr, res, g1, g2);
 			uk_dbg_line(l);
+		}
+	}
+
+	/* Track a freshly-opened /dev/loopN[pM] node so raw reads/writes on it serve
+	 * from the backing image (blkid/file/fdisk/dd and bare `mount` auto-detect). */
+	if (g_lo_any && (nr == PR_openat || nr == PR_openat2 || nr == PR_creat)) {
+		long fd = (long)(int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+		if (fd >= 0) {
+			char lk[64], pp[PATH_MAX]; snprintf(lk, sizeof lk, "/proc/%d/fd/%ld", tracee->pid, fd);
+			ssize_t pn = readlink(lk, pp, sizeof pp - 1);
+			if (pn > 0) { pp[pn] = '\0'; uklofd_record(tracee, (int) fd, pp); }
 		}
 	}
 

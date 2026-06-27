@@ -56,6 +56,20 @@ int main(int argc, char **argv)
 	if (part > 0) cfg.info.lo_flags = LO_FLAGS_PARTSCAN;
 	if (ioctl(lfd, LOOP_CONFIGURE, &cfg) < 0) { perror("LOOP_CONFIGURE"); return 1; }
 
+	/* read-routing self-check: a fresh read of the whole-loop node must serve the
+	 * backing image (this is what blkid/fdisk/dd/bare-mount rely on). The MBR
+	 * signature 0x55AA at offset 510 proves raw reads reach the image. */
+	{
+		char wd[64]; snprintf(wd, sizeof wd, "/dev/loop%d", n);
+		int rfd = open(wd, O_RDONLY);
+		if (rfd >= 0) {
+			unsigned char sec[512]; ssize_t rr = pread(rfd, sec, 512, 0);  /* loop-relative offset 0 */
+			if (rr == 512 && sec[510] == 0x55 && sec[511] == 0xAA) printf("  RAWREAD=mbr-ok\n");
+			else printf("  RAWREAD=bad(rr=%zd b=%02x%02x)\n", rr, sec[510], sec[511]);
+			close(rfd);
+		}
+	}
+
 	char src[80];
 	if (part > 0) snprintf(src, sizeof src, "/dev/loop%dp%d", n, part);
 	else          snprintf(src, sizeof src, "/dev/loop%d", n);

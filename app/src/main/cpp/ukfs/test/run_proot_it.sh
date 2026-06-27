@@ -373,8 +373,12 @@ if [ -f "$W/pi.img" ] && have losetup && have mount; then
   cat > "$W/guest_loop.sh" <<EOF
 set +e
 R=0; fail(){ echo "  GUESTFAIL: \$1"; R=1; }
-# ext4 root partition (p2) via loop partition scan
-"$W/loopmnt" "$W/pi.img" "$MPE" 2 || fail "loop mount p2 (ext4)"
+# ext4 root partition (p2) via loop partition scan (uses /dev/loop0). The helper
+# also raw-reads the loop node and verifies the MBR signature (read-routing: what
+# blkid/fdisk/dd/bare-mount rely on).
+LOUT=\$("$W/loopmnt" "$W/pi.img" "$MPE" 2) || fail "loop mount p2 (ext4)"
+echo "\$LOUT" | sed 's/^/  /'
+echo "\$LOUT" | grep -q RAWREAD=mbr-ok || fail "loop raw read-routing (MBR sig)"
 echo loopdata > "$MPE/lf.txt" || fail "ext4 loop write"
 [ "\$(cat "$MPE/lf.txt")" = loopdata ] || fail "ext4 loop readback"
 # FAT boot partition via whole-loop at offset (mount -o loop,offset= style)
