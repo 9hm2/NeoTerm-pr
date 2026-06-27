@@ -101,6 +101,7 @@ struct ukfch {
 	 * fch_send when an accessor produces a request. dvec = iovcnt for a parked
 	 * readv(), or -1 for a plain read(). */
 	Tracee *dmn; word_t dbuf; int dcnt; int dvec; int parked;
+	char marker[256];   /* host path the /dev/fuse fd resolves to (survives fork) */
 };
 static struct ukfch g_fch[UK_NFCH];
 static int g_fopen_tid[UK_NFCH];          /* this thread's open() is for /dev/fuse */
@@ -163,6 +164,34 @@ static struct ukfch *fch_by_fd(int pid, int fd)
 	return NULL;
 }
 
+/* readlink /proc/<tid>/fd/<fd> -> host path (or "" on failure). */
+static void fch_fdpath(int tid, int fd, char *out, size_t cap)
+{
+	char lk[64]; snprintf(lk, sizeof lk, "/proc/%d/fd/%d", tid, fd);
+	ssize_t n = readlink(lk, out, cap - 1);
+	out[(n > 0) ? n : 0] = '\0';
+}
+
+/* Find the channel for a daemon's /dev/fuse fd, tolerating fork/daemonization:
+ * a forked child inherits the fd (same number, same underlying open file, hence
+ * the same resolved marker path) but has a new tgid. Match by (tgid,fd) first,
+ * else by the fd's resolved marker path and ADOPT the channel to this tgid. */
+static struct ukfch *fch_resolve(Tracee *tracee, int fd)
+{
+	int tg = ukfs_tgid(tracee->pid);
+	struct ukfch *ch = fch_by_fd(tg, fd);
+	if (ch) return ch;
+	char pp[256]; fch_fdpath(tracee->pid, fd, pp, sizeof pp);
+	if (!pp[0]) return NULL;
+	for (int i = 0; i < UK_NFCH; i++)
+		if (g_fch[i].used && g_fch[i].eng && g_fch[i].marker[0] && strcmp(g_fch[i].marker, pp) == 0) {
+			char l[80]; snprintf(l, sizeof l, "uk_fs: fuse adopt fd=%d pid=%d (fork)\n", fd, tg); uk_dbg_line(l);
+			g_fch[i].pid = tg; g_fch[i].fd = fd;   /* adopt to the forked server */
+			return &g_fch[i];
+		}
+	return NULL;
+}
+
 /* fused transport: store one request for the daemon; if the daemon is parked in
  * a blocking read(), deliver it and resume the daemon right away. */
 static int fch_send(void *c, const void *buf, size_t len)
@@ -213,6 +242,7 @@ static void uknl_fuse_open_exit(Tracee *tracee)
 	if (!ch->eng) { free(ch->req); free(ch->rep); memset(ch, 0, sizeof *ch); return; }
 	fused_set_io(ch->eng, fch_send, fch_recv, ch);
 	ch->used = 1; ch->pid = pid; ch->fd = (int) fd;
+	fch_fdpath(tracee->pid, (int) fd, ch->marker, sizeof ch->marker);   /* for fork adoption */
 	{ char l[80]; snprintf(l, sizeof l, "uk_fs: /dev/fuse open fd=%ld pid=%d\n", fd, pid); uk_dbg(tracee, l); }
 }
 
@@ -226,7 +256,7 @@ static bool uknl_fuse_chan_io(Tracee *tracee, word_t nr)
 	int is_vec   = (nr == PR_readv || nr == PR_writev);
 	if (!is_read && !is_write) return false;
 	int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
-	struct ukfch *ch = fch_by_fd(ukfs_tgid(tracee->pid), fd);
+	struct ukfch *ch = fch_resolve(tracee, fd);   /* tolerates fork/daemonize */
 	if (!ch) return false;
 	word_t a2 = peek_reg(tracee, CURRENT, SYSARG_2);   /* buf, or iov base */
 	size_t a3 = (size_t) peek_reg(tracee, CURRENT, SYSARG_3);   /* count, or iovcnt */
@@ -312,7 +342,7 @@ static bool uknl_fuse_mount(Tracee *tracee)
 	char tgt[PATH_MAX];
 	if (get_sysarg_path(tracee, tgt, SYSARG_2) < 0) return false;
 
-	struct ukfch *ch = fch_by_fd(ukfs_tgid(tracee->pid), fdN);
+	struct ukfch *ch = fch_resolve(tracee, fdN);
 	if (!ch || !ch->eng) { char l[160]; snprintf(l, sizeof l, "uk_fs: fuse mount fd=%d '%s' no channel\n", fdN, tgt); uk_dbg(tracee, l); return false; }
 	if (ukm_register_fuse(tgt, ch->eng, (int)(ch - g_fch)) < 0) return false;
 	{ char l[PATH_MAX + 64]; snprintf(l, sizeof l, "uk_fs: FUSE mount '%s' fd=%d\n", tgt, fdN); uk_dbg(tracee, l); }
