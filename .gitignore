@@ -34,6 +34,8 @@ proguard/
 /.idea/libraries
 .DS_Store
 /build
+# Gradle build output for every module (app/.gitignore already covers app/)
+build/
 /captures
 .externalNativeBuild
 
