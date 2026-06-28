@@ -24,7 +24,8 @@ through standard Linux interfaces — without rooting the device.
 - **Self-contained Linux distros in proot** — Ubuntu / Kali / Alpine / Arch, no root.
 - **Embedded X11 server** (Termux:X11 baked into the APK) for graphical apps.
 - **Native audio** — output *and* microphone via a bundled PulseAudio.
-- **Camera** → MJPEG stream the distro can read (ffmpeg/OpenCV/mpv/browsers).
+- **Camera** → a real `/dev/video0` (V4L2) the distro opens natively
+  (OpenCV/ffmpeg/GStreamer/cheese), plus an MJPEG stream for URL-aware apps.
 - **GPS** → a built-in **gpsd**-protocol server; `cgps`/`gpspipe` just work.
 - **Sensors & battery** → a faithful `/sys` IIO + `power_supply` tree (`iio_info`,
   `upower`, `monitor-sensor`, auto-rotate).
@@ -108,19 +109,36 @@ It runs as the app (no root, no proot) and is reachable from the distro via
   - Tuned for usable loudness out of the box (VOICE_RECOGNITION preset + default
     software gain); fine-tune live with `pactl set-source-volume`.
 
-## Camera — MJPEG stream
+## Camera — real `/dev/video0` (V4L2) + MJPEG stream
 
-A tiny HTTP server (app uid, holding the `CAMERA` permission) serves
-`multipart/x-mixed-replace` JPEG frames on **`127.0.0.1:4715/video.mjpeg`**.
+The phone camera is exposed to the distro **two ways**, both no-root:
 
-- Any distro app that accepts a URL reads it — `ffmpeg`, OpenCV `VideoCapture`,
-  `mpv`, GStreamer, browsers under X11. NeoTerm exports
-  `NEOTERM_CAMERA_URL=http://127.0.0.1:4715/video.mjpeg` when the camera is enabled.
-- **Lazy:** the camera is opened only while a client is connected, so the device
-  isn't held (and the system "camera in use" indicator isn't lit) when idle.
+**1. Native `/dev/video0` (V4L2).** A proot syscall shim (`uknl_cam_redirect.c`,
+gated by `UK_CAM`) turns a bound marker into a real V4L2 capture device and proxies
+every V4L2 `ioctl`/`read`/`mmap`/`poll` on it to the app-side `CameraBridge` over the
+abstract socket `io.neoterm.camera`. So apps hardcoded to a camera device open it
+natively — `cv2.VideoCapture(0)`, `ffmpeg -f v4l2 -i /dev/video0`, GStreamer
+`v4l2src`, `cheese`, `guvcview`, `v4l2-ctl`, browsers' `getUserMedia` under X11.
+
+- **Formats:** `MJPG` (JPEG passthrough, zero re-encode) and `YUYV` (raw), at the
+  camera's real resolutions (enumerated via `VIDIOC_ENUM_FRAMESIZES`).
+- **I/O methods:** `MMAP` (the guest mmaps the marker file; frames are `pwrite()`n
+  into it at the buffer offset — no mmap interception), `USERPTR`, and `read()`.
+- **Controls** are proxied to Camera2 and show up under `v4l2-ctl --list-ctrls`:
+  brightness (→ AE exposure compensation), continuous autofocus, and zoom
+  (`CONTROL_ZOOM_RATIO`, Android 11+).
+- A fake `/sys/dev/char/81:0/uevent` (`DEVNAME=video0`) lets `v4l2-ctl`/`libv4l`
+  classify the node; `NEOTERM_CAMERA_V4L2=/dev/video0` is exported as a hint.
+
+**2. MJPEG-over-HTTP** (unchanged). A tiny HTTP server serves
+`multipart/x-mixed-replace` JPEG frames on **`127.0.0.1:4715/video.mjpeg`** —
+handy for URL-aware apps; `NEOTERM_CAMERA_URL` points at it.
+
+- **Lazy:** the camera is opened only while a client is connected/streaming, so the
+  device isn't held (and the system "camera in use" indicator isn't lit) when idle.
 - Toggle under **Settings → General → Camera**.
-- *Limitation:* this is a stream, not a `/dev/video0` V4L2 node — apps hardcoded to
-  a V4L2 device won't see it (that would need a V4L2 shim or root + v4l2loopback).
+- *Limitation:* only the proot guest sees `/dev/video0` (not native Android apps);
+  `V4L2_MEMORY_DMABUF` is unsupported (apps fall back to `MMAP`).
 
 ## GPS — gpsd protocol
 

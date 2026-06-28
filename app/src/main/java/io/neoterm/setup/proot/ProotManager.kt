@@ -285,6 +285,23 @@ object ProotManager {
     // (Android SELinux blocks the real /sys/dev/block). Empty until a drive attaches.
     io.neoterm.setup.usbserial.BlockSysfsBridge.sysfsBinds().forEach { (host, guest) -> bind(args, host, guest) }
 
+    // Camera: expose a REAL /dev/video0 V4L2 node (proot cam shim, UK_CAM). An empty
+    // marker becomes the device; the shim (uknl_cam_redirect.c) proxies its V4L2
+    // ioctls/read/mmap to CameraBridge over io.neoterm.camera, so OpenCV/ffmpeg/
+    // GStreamer/cheese open it natively (not just URL-aware apps). A fake
+    // /sys/dev/char/81:0/uevent (DEVNAME=video0) lets v4l2-ctl/libv4l classify it —
+    // bound via the parent dir since proot's -b can't take a colon in the guest path.
+    if (NeoPreference.isCameraEnabled()) {
+      val sysdata = File("${NeoTermPath.PROOT_ROOT_PATH}/sysdata").apply { mkdirs() }
+      val video = File(sysdata, "video0")
+      if (!video.exists()) runCatching { video.writeText("") }
+      bind(args, video.absolutePath, "/dev/video0")
+      val charDir = File("${NeoTermPath.PROOT_ROOT_PATH}/sys-dev-char").apply { mkdirs() }
+      val ue = File(charDir, "81:0").apply { mkdirs() }.let { File(it, "uevent") }
+      runCatching { ue.writeText("MAJOR=81\nMINOR=0\nDEVNAME=video0\n") }
+      bind(args, charDir.absolutePath, "/sys/dev/char")
+    }
+
     // Fake /proc fájlok (proot-distro sysdata mintájára): az Android korlátozott
     // /proc-ja miatt a ps/top/uptime/free hibára futna ("Unable to get system
     // boot time"). A /proc bind UTÁN kötjük, hogy a konkrétabb bind felülírja.
@@ -348,6 +365,8 @@ object ProotManager {
     // requested. URL-aware apps (ffmpeg/OpenCV/mpv) read it; it is not a /dev/video0 device.
     if (NeoPreference.isCameraEnabled()) {
       args.add("NEOTERM_CAMERA_URL=http://127.0.0.1:4715/video.mjpeg")
+      // Native V4L2 node too (proot cam shim) — apps hardcoded to /dev/video0.
+      args.add("NEOTERM_CAMERA_V4L2=/dev/video0")
     }
     // GPS: NeoTerm provides a built-in gpsd on 127.0.0.1:2947 (GpsBridge speaks the gpsd client
     // protocol), so distro clients (cgps, gpspipe, …) work with no gpsd installed — they default
@@ -481,6 +500,8 @@ object ProotManager {
     // Only with the storage toggle on: proot then traps read/write/lseek/… for the
     // /dev/uksd0 block proxy (otherwise those syscalls aren't filtered at all).
     if (NeoPreference.isUsbStorageEnabled()) { env.add("UK_BLOCK=1"); env.add("UK_FS=1") }
+    // Camera: trap the V4L2 syscalls (ioctl/read/poll/…) for the /dev/video0 shim.
+    if (NeoPreference.isCameraEnabled()) { env.add("UK_CAM=1") }
     return env.toTypedArray()
   }
 }

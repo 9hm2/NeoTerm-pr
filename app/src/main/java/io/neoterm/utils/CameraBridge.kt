@@ -13,12 +13,18 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.media.Image
 import android.media.ImageReader
+import android.net.LocalServerSocket
+import android.net.LocalSocket
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.util.Range
+import android.util.Rational
 import androidx.core.content.ContextCompat
 import io.neoterm.component.config.NeoPreference
 import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -67,8 +73,34 @@ object CameraBridge {
   private val clientCount = AtomicInteger(0)
   private val frameLock = Object()
   @Volatile private var latestJpeg: ByteArray? = null
+  /** Latest frame as an upright NV21 buffer (+ dims) for the V4L2 YUYV path. */
+  @Volatile private var latestNv21: ByteArray? = null
+  @Volatile private var nv21W = 0
+  @Volatile private var nv21H = 0
+  @Volatile private var frameSeq = 0
   /** Camera sensor mounting orientation in degrees; frames are rotated by this to be upright. */
   @Volatile private var sensorOrientation = 0
+
+  // ── V4L2 bridge (io.neoterm.camera) — exposes a real /dev/video0 to proot ──
+  private const val V4L2_SOCKET = "io.neoterm.camera"
+  private var v4l2Thread: Thread? = null
+  private var v4l2Server: LocalServerSocket? = null
+  /** Requested capture size from a V4L2 START (0 = use the Settings default). */
+  @Volatile private var reqW = 0
+  @Volatile private var reqH = 0
+  // Camera2-backed control values, applied to the repeating request.
+  @Volatile private var ctrlEv = 0          // exposure compensation (steps)
+  @Volatile private var ctrlAf = 1          // continuous autofocus on/off
+  @Volatile private var ctrlZoom = 100      // zoom, percent of min (100 = 1x)
+  @Volatile private var openW = 0           // currently-open capture size (pre-rotation)
+  @Volatile private var openH = 0
+  @Volatile private var v4lFourcc = "MJPG"  // negotiated V4L2 pixel format
+  @Volatile private var camRotation = 0     // sensor mount rotation, cached for caps/size mapping
+
+  // V4L2 control ids (real V4L2 CIDs so generic control UIs recognise them).
+  private const val CID_BRIGHTNESS = 0x00980900   // -> AE exposure compensation
+  private const val CID_FOCUS_AUTO = 0x009A0901   // -> continuous AF on/off
+  private const val CID_ZOOM_ABS   = 0x009A090D   // -> zoom ratio (API 30+)
 
   fun start(context: Context) {
     if (running) return
@@ -84,6 +116,9 @@ object CameraBridge {
     io.neoterm.setup.proot.Kmsg.log("camera: MJPEG server starting on 127.0.0.1:$PORT/video.mjpeg")
     appContext = context.applicationContext
     serverThread = Thread({ serverLoop() }, "camera-bridge").apply { isDaemon = true; start() }
+    // V4L2 bridge: distro apps open /dev/video0 natively (the proot shim proxies
+    // its ioctls/read/mmap here over io.neoterm.camera).
+    v4l2Thread = Thread({ v4l2ServerLoop() }, "camera-v4l2").apply { isDaemon = true; start() }
   }
 
   fun stop() {
@@ -92,6 +127,9 @@ object CameraBridge {
     runCatching { serverSocket?.close() }
     serverSocket = null
     serverThread = null
+    runCatching { v4l2Server?.close() }
+    v4l2Server = null
+    v4l2Thread = null
     closeCamera()
     if (was) io.neoterm.setup.proot.Kmsg.log("camera: MJPEG server stopped")
   }
@@ -186,6 +224,7 @@ object CameraBridge {
         sensorOrientation = cm.getCameraCharacteristics(camId)
           .get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
         val size = chooseSize(cm, camId)
+        openW = size.first; openH = size.second
 
         val thread = HandlerThread("camera-capture").apply { start() }
         val handler = Handler(thread.looper)
@@ -199,7 +238,7 @@ object CameraBridge {
             val jpeg = yuvToJpeg(img)
             if (jpeg != null) {
               latestJpeg = jpeg
-              synchronized(frameLock) { frameLock.notifyAll() }
+              synchronized(frameLock) { frameSeq++; frameLock.notifyAll() }
             }
           } catch (e: Exception) {
             // Skip a bad frame.
@@ -244,10 +283,9 @@ object CameraBridge {
             captureSession = session
           }
           try {
-            val req = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-              addTarget(surface)
-              set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-            }
+            val req = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            req.addTarget(surface)
+            applyControls(req)
             session.setRepeatingRequest(req.build(), null, cameraHandler)
           } catch (e: Exception) {
             Log.w(TAG, "setRepeatingRequest failed", e)
@@ -291,7 +329,8 @@ object CameraBridge {
   }
 
   private fun chooseSize(cm: CameraManager, camId: String): Pair<Int, Int> {
-    val (tw, th) = requestedSize()
+    // A V4L2 client's requested size wins over the Settings default.
+    val (tw, th) = if (reqW >= 2 && reqH >= 2) reqW to reqH else requestedSize()
     return try {
       val map = cm.getCameraCharacteristics(camId)
         .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -333,6 +372,8 @@ object CameraBridge {
       nv21 = rotateNv21(nv21, w, h, rot)
       if (rot == 90 || rot == 270) { val t = w; w = h; h = t }
     }
+    // Stash the upright NV21 + dims for the V4L2 YUYV path (raw-capture apps).
+    latestNv21 = nv21; nv21W = w; nv21H = h
     val yuv = YuvImage(nv21, ImageFormat.NV21, w, h, null)
     val out = ByteArrayOutputStream()
     return if (yuv.compressToJpeg(Rect(0, 0, w, h), JPEG_QUALITY, out))
@@ -431,5 +472,254 @@ object CameraBridge {
       }
     }
     return nv21
+  }
+
+  // ──────────────────────── V4L2 bridge (io.neoterm.camera) ────────────────────────
+  // The proot shim (uknl_cam_redirect.c, gated by UK_CAM) turns /dev/video0 into a real
+  // V4L2 capture node and proxies its ioctls/read/mmap to this server. Protocol:
+  //   CAPS                -> OK <nfmt> then per fmt "<FOURCC> <nsizes>" + "<w> <h> <fpsN> <fpsD>"
+  //   START <FOURCC> <w> <h> -> OK | ERR
+  //   FRAME [timeout_ms]  -> OK <len> + <len> bytes   (current frame, negotiated format)
+  //   STOP                -> OK
+  //   CTRL_LIST           -> OK <n> then "<id> <type> <min> <max> <step> <def> <flags> <name>"
+  //   CTRL_MENU <id>      -> OK <n> then "<index> <name>"
+  //   CTRL_GET <id>       -> OK <value> | ERR ;  CTRL_SET <id> <val> -> OK | ERR
+
+  private fun v4l2ServerLoop() {
+    try {
+      LocalServerSocket(V4L2_SOCKET).use { server ->
+        v4l2Server = server
+        io.neoterm.setup.proot.Kmsg.log("camera: V4L2 bridge listening on @$V4L2_SOCKET (/dev/video0)")
+        while (running) {
+          val client = try { server.accept() } catch (e: Exception) { if (running) Log.w(TAG, "v4l2 accept failed", e); break }
+          Thread({ handleV4l2Client(client) }, "camera-v4l2-client").apply { isDaemon = true }.start()
+        }
+      }
+    } catch (e: Exception) {
+      if (running) Log.w(TAG, "v4l2 server stopped", e)
+    } finally {
+      v4l2Server = null
+    }
+  }
+
+  private fun handleV4l2Client(socket: LocalSocket) {
+    var started = false
+    try {
+      val input = socket.inputStream
+      val out = socket.outputStream
+      val buf = StringBuilder()
+      val rd = ByteArray(4096)
+      fun readLine(): String? {
+        while (true) {
+          val nl = buf.indexOf("\n")
+          if (nl >= 0) { val l = buf.substring(0, nl); buf.delete(0, nl + 1); return l }
+          val n = input.read(rd)
+          if (n < 0) return null
+          buf.append(String(rd, 0, n, Charsets.US_ASCII))
+        }
+      }
+      while (true) {
+        val line = readLine() ?: break
+        val p = line.trim().split(" ").filter { it.isNotEmpty() }
+        if (p.isEmpty()) continue
+        when (p[0]) {
+          "CAPS" -> out.write(capsReply().toByteArray())
+          "START" -> {
+            val ok = if (p.size >= 4) {
+              v4lFourcc = p[1]
+              if (!started) { started = true; clientCount.incrementAndGet() }
+              ensureCaptureFor(p[2].toIntOrNull() ?: 640, p[3].toIntOrNull() ?: 480)
+              true
+            } else false
+            out.write((if (ok) "OK\n" else "ERR\n").toByteArray())
+          }
+          "STOP" -> {
+            if (started) { started = false; if (clientCount.decrementAndGet() == 0) closeCamera() }
+            out.write("OK\n".toByteArray())
+          }
+          "FRAME" -> writeFrame(out, p.getOrNull(1)?.toIntOrNull() ?: 1000)
+          "CTRL_LIST" -> out.write(ctrlListReply().toByteArray())
+          "CTRL_MENU" -> out.write("OK 0\n".toByteArray())   // no menu controls exposed
+          "CTRL_GET" -> {
+            val v = ctrlGet(p.getOrNull(1)?.toLongOrNull()?.toInt() ?: -1)
+            out.write((if (v != null) "OK $v\n" else "ERR\n").toByteArray())
+          }
+          "CTRL_SET" -> {
+            val ok = ctrlSet(p.getOrNull(1)?.toLongOrNull()?.toInt() ?: -1, p.getOrNull(2)?.toIntOrNull() ?: 0)
+            out.write((if (ok) "OK\n" else "ERR\n").toByteArray())
+          }
+          else -> out.write("ERR\n".toByteArray())
+        }
+        out.flush()
+      }
+    } catch (e: Exception) {
+      // client gone — normal
+    } finally {
+      if (started && clientCount.decrementAndGet() == 0) closeCamera()
+      runCatching { socket.close() }
+    }
+  }
+
+  /** Pick the device camera's characteristics (back-preferred), or null. */
+  private fun chars(): CameraCharacteristics? {
+    val ctx = appContext ?: return null
+    return runCatching {
+      val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+      val id = pickCamera(cm) ?: return null
+      cm.getCameraCharacteristics(id)
+    }.getOrNull()
+  }
+
+  /** Post-rotation output sizes (what the guest will actually receive). */
+  private fun outputSizes(): List<Pair<Int, Int>> {
+    val ch = chars() ?: return listOf(1280 to 720, 640 to 480)
+    camRotation = ((ch.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0) % 360 + 360) % 360
+    val map = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+    val sizes = map?.getOutputSizes(ImageFormat.YUV_420_888) ?: return listOf(1280 to 720, 640 to 480)
+    val swap = camRotation == 90 || camRotation == 270
+    // A few common sizes (largest + standard) so caps stay small and sane.
+    val wanted = listOf(1920 to 1080, 1280 to 720, 640 to 480, 320 to 240)
+    val have = sizes.map { (if (swap) it.height else it.width) to (if (swap) it.width else it.height) }.toSet()
+    val out = wanted.filter { have.contains(it) }.toMutableList()
+    if (out.isEmpty()) {
+      val big = sizes.maxByOrNull { it.width.toLong() * it.height }!!
+      out.add((if (swap) big.height else big.width) to (if (swap) big.width else big.height))
+    }
+    return out
+  }
+
+  private fun capsReply(): String {
+    val sizes = outputSizes()
+    val sb = StringBuilder("OK 2\n")
+    for (fcc in listOf("MJPG", "YUYV")) {
+      sb.append("$fcc ${sizes.size}\n")
+      for ((w, h) in sizes) sb.append("$w $h 30 1\n")
+    }
+    return sb.toString()
+  }
+
+  /** Ensure the camera is capturing at the post-rotation size (w,h); reopen if it changed. */
+  private fun ensureCaptureFor(w: Int, h: Int) {
+    chars()?.get(CameraCharacteristics.SENSOR_ORIENTATION)?.let { camRotation = (it % 360 + 360) % 360 }
+    val swap = camRotation == 90 || camRotation == 270
+    val cw = if (swap) h else w      // pre-rotation capture size
+    val chh = if (swap) w else h
+    synchronized(cameraLock) {
+      if (cameraDevice != null && (openW != cw || openH != chh)) closeCamera()
+    }
+    reqW = cw; reqH = chh
+    if (cameraDevice == null) openCamera()
+  }
+
+  private fun writeFrame(out: OutputStream, timeoutMs: Int) {
+    // Wait for a fresh frame (or use the latest if one already exists).
+    synchronized(frameLock) {
+      val seq0 = frameSeq
+      val deadline = System.currentTimeMillis() + timeoutMs
+      while (frameSeq == seq0 && System.currentTimeMillis() < deadline) {
+        val rem = deadline - System.currentTimeMillis()
+        if (rem <= 0) break
+        runCatching { frameLock.wait(rem) }
+      }
+    }
+    val data: ByteArray? = if (v4lFourcc == "YUYV") {
+      latestNv21?.let { nv21ToYuyv(it, nv21W, nv21H) }
+    } else latestJpeg
+    if (data == null) { out.write("ERR\n".toByteArray()); return }
+    out.write("OK ${data.size}\n".toByteArray())
+    out.write(data)
+  }
+
+  /** Pack an upright NV21 buffer into YUYV (YUY2): Y0 U Y1 V per pixel pair. */
+  private fun nv21ToYuyv(nv21: ByteArray, w: Int, h: Int): ByteArray {
+    val out = ByteArray(w * h * 2)
+    val ySize = w * h
+    var o = 0
+    for (j in 0 until h) {
+      val yRow = j * w
+      val cRow = ySize + (j / 2) * w
+      var i = 0
+      while (i < w) {
+        val y0 = nv21[yRow + i]
+        val y1 = if (i + 1 < w) nv21[yRow + i + 1] else y0
+        val ci = cRow + (i / 2) * 2
+        val v = nv21[ci]
+        val u = nv21[ci + 1]
+        out[o++] = y0; out[o++] = u; out[o++] = y1; out[o++] = v
+        i += 2
+      }
+    }
+    return out
+  }
+
+  // ── controls mapped to Camera2 ──
+  private fun evRange(): Range<Int> =
+    chars()?.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(0, 0)
+
+  private fun maxZoomPercent(): Int {
+    val ch = chars() ?: return 100
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      val r = ch.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+      if (r != null) (r.upper * 100).toInt() else 100
+    } else {
+      val z = ch.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+      (z * 100).toInt()
+    }
+  }
+
+  private fun ctrlListReply(): String {
+    val ev = evRange()
+    val maxZoom = maxZoomPercent()
+    val sb = StringBuilder()
+    val lines = ArrayList<String>()
+    // id type min max step def flags name      (type: 1=int 2=bool)
+    lines.add("$CID_BRIGHTNESS 1 ${ev.lower} ${ev.upper} 1 0 0 Brightness")
+    lines.add("$CID_FOCUS_AUTO 2 0 1 1 1 0 Focus, Automatic Continuous")
+    if (maxZoom > 100) lines.add("$CID_ZOOM_ABS 1 100 $maxZoom 1 100 0 Zoom, Absolute")
+    sb.append("OK ${lines.size}\n")
+    for (l in lines) sb.append(l).append("\n")
+    return sb.toString()
+  }
+
+  private fun ctrlGet(id: Int): Int? = when (id) {
+    CID_BRIGHTNESS -> ctrlEv
+    CID_FOCUS_AUTO -> ctrlAf
+    CID_ZOOM_ABS -> ctrlZoom
+    else -> null
+  }
+
+  private fun ctrlSet(id: Int, value: Int): Boolean {
+    when (id) {
+      CID_BRIGHTNESS -> { val r = evRange(); ctrlEv = value.coerceIn(r.lower, r.upper) }
+      CID_FOCUS_AUTO -> ctrlAf = if (value != 0) 1 else 0
+      CID_ZOOM_ABS -> ctrlZoom = value.coerceIn(100, maxZoomPercent())
+      else -> return false
+    }
+    reapplyControls()
+    return true
+  }
+
+  private fun applyControls(req: CaptureRequest.Builder) {
+    req.set(CaptureRequest.CONTROL_AF_MODE,
+      if (ctrlAf != 0) CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE else CaptureRequest.CONTROL_AF_MODE_OFF)
+    if ((evRange().upper - evRange().lower) != 0)
+      req.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, ctrlEv)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && ctrlZoom > 100)
+      req.set(CaptureRequest.CONTROL_ZOOM_RATIO, ctrlZoom / 100f)
+  }
+
+  /** Rebuild + re-submit the repeating request after a control change. */
+  private fun reapplyControls() {
+    synchronized(cameraLock) {
+      val device = cameraDevice ?: return
+      val session = captureSession ?: return
+      val surface = imageReader?.surface ?: return
+      runCatching {
+        val req = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+        req.addTarget(surface)
+        applyControls(req)
+        session.setRepeatingRequest(req.build(), null, cameraHandler)
+      }
+    }
   }
 }

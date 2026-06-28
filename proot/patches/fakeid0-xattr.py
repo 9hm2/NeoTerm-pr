@@ -633,6 +633,10 @@ if 'uknl_maybe_inject_ttyusb' not in s:
         '\t\t\tif (rr == 0) break;\n\t\t\toff += rr;\n'
         '\t\t}\n'
         '\t}\n'
+        '\tif (getenv("UK_CAM")) {\n'
+        '\t\tsize_t r = uknl_put_dirent64(out + off, sizeof(out) - off, "video0", ino++, (long long)(0x7f000000 + off), 2 /* DT_CHR */);\n'
+        '\t\tif (r > 0) off += r;\n'
+        '\t}\n'
         '\tif (off == 0 || off > count) { uknl_inj_add(tracee->pid, fd); return false; }\n'
         '\tif (write_data(tracee, buf_addr, out, off) < 0) return false;\n'
         '\tpoke_reg(tracee, SYSARG_RESULT, off);\n'
@@ -1024,6 +1028,49 @@ if 'uknl_fs_dispatch' not in s:
                   'void apply_emulated_umount(Tracee *tracee)\n{\n'
                   '\tif (uknl_fs_umount_hook(tracee)) return;', 1)
     wr(EN, s)
+
+# ---- syscall/enter.c: V4L2 camera redirect (/dev/video0 -> io.neoterm.camera).
+#      The C lives in patches/uknl_cam_redirect.c; inject it just before
+#      translate_syscall_enter (after the fs redirect, so it reuses the block
+#      proxy's uksd_wn/rn/rl socket helpers) and call its dispatch right after
+#      the fs dispatch in the syscall switch. ----
+EN = ROOT + "/syscall/enter.c"; s = rd(EN)
+if 'uknl_cam_dispatch' not in s:
+    _pd = os.path.dirname(os.path.abspath(__file__))
+    cam_c = rd(os.path.join(_pd, "uknl_cam_redirect.c"))
+    must('int translate_syscall_enter(Tracee *tracee)\n{' in s, "enter.c translate_syscall_enter anchor (cam)")
+    s = s.replace('int translate_syscall_enter(Tracee *tracee)\n{',
+                  cam_c + '\nint translate_syscall_enter(Tracee *tracee)\n{', 1)
+    cam_anchor = ('\tif (uknl_fs_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
+                  '\tstatus = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);')
+    must(cam_anchor in s, "enter.c fs-dispatch anchor (cam)")
+    s = s.replace(cam_anchor,
+                  '\tif (uknl_fs_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
+                  '\tif (uknl_cam_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
+                  '\tstatus = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);', 1)
+    wr(EN, s)
+
+# ---- syscall/seccomp.c: trap the camera I/O syscalls only when UK_CAM is set. ----
+SC = ROOT + "/syscall/seccomp.c"; s = rd(SC)
+if 'uk_cam_sysnums' not in s:
+    sc_anchor = 'status = merge_filtered_sysnums(tracee->ctx, &filtered_sysnums, proot_sysnums);'
+    must(sc_anchor in s, "seccomp proot_sysnums merge anchor (cam)")
+    s = s.replace(sc_anchor, sc_anchor +
+                  '\n\t/* NeoTerm: trap the V4L2 camera syscalls only when /dev/video0 is wanted. */\n'
+                  '\tif (status >= 0 && getenv("UK_CAM")) {\n'
+                  '\t\tstatic const FilteredSysnum uk_cam_sysnums[] = {\n'
+                  '\t\t\t{ PR_ioctl,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_read,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_pread64,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_close,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_fstat,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_poll,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_ppoll,\tFILTER_SYSEXIT },\n'
+                  '\t\t\tFILTERED_SYSNUM_END,\n'
+                  '\t\t};\n'
+                  '\t\tstatus = merge_filtered_sysnums(tracee->ctx, &filtered_sysnums, uk_cam_sysnums);\n'
+                  '\t}', 1)
+    wr(SC, s)
 
 # ---- tracee/event.c: a re-entrant "pump the event loop until fd readable" used
 #      by the FUSE redirect. A guest libfuse daemon's /dev/fuse read()/write()
