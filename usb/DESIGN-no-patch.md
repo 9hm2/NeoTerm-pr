@@ -73,17 +73,34 @@ patches. No conflict with `/dev/ttyUSB*` or `/dev/uksd0`:
   Refinement: the shim should **filter bridge-owned devices** out of the libusb
   enumeration when those toggles are on, to avoid duplicates/confusion.
 
-## Host-testing limitation (why this is device-validated, unlike the camera)
+## Host testing — via umockdev (no real USB needed)
 
-The host has **no USB** (`/dev/bus/usb` absent; no `dummy_hcd`/configfs to make a
-virtual device), so the `USBDEVFS` ioctl proxy **cannot be host-validated** at all.
-Enumeration is also opaque on host: stock (udev-built) libusb chose the **sysfs**
-path on the host (host `/sys` is readable) and ignored a faked `/sys/bus/usb`;
-forcing the usbfs path couldn't be confirmed because proot blocks nested `ptrace`
-(no strace) and the libusb source can't be cloned through the proxy.
+`umockdev` (libumockdev-preload) mocks a USB device entirely in userspace, so the
+host CAN validate this without a real device. Findings (see `usb/test/`):
 
-→ Implementation must be validated **on device**, iteratively, starting from
-enumeration (`lsusb` lists) then `lsusb -v` (control transfers) then bulk/URB I/O.
+**Enumeration is VALIDATED.** Straced stock (udev-built) libusb under umockdev: it
+enumerates a device purely from **sysfs**, reading exactly these per-device files:
+`subsystem` (symlink → .../bus/usb), `uevent`, `busnum`, `devnum`, `speed`, and the
+binary `descriptors`. With a proper mock (`usb/test/umock_enum.c`, binary
+descriptors via the libumockdev C API) stock libusb lists the device:
+`devices=1  bus=1 addr=2 1234:5678`. So a **readable fake `/sys/bus/usb`**
+(BlockSysfsBridge pattern, populated from `io.neoterm.usb` LIST + descriptors)
+makes unmodified libusb enumerate — no patch, no ioctl needed for enumeration.
+
+Implication for the device: on Android `/sys/bus/usb/devices` is **EACCES** (exists
+but unreadable), which is almost certainly why the in-distro patch exists — stock
+libusb sees sysfs as "present" but can't read it → 0 devices. The shim's fix is to
+**bind a readable fake `/sys/bus/usb`** over it (the camera/block bridges already
+overlay `/sys` subtrees the same way). The usbfs-scan / fd-injection route is NOT
+needed for enumeration.
+
+**I/O (USBDEVFS ioctls)** can also be host-tested with umockdev's ioctl
+record/replay (`umockdev-run -i ioctl=dump`), but needs an ioctl dump (recorded
+from a real device, or hand-authored for control transfers). Still device-validated
+for real hardware, but the proxy marshalling logic is host-checkable.
+
+→ Plan: enumeration first (host-validated via umockdev + device), then control
+transfers (umockdev ioctl replay + device), then bulk/URB (device).
 
 ## Phased plan
 
