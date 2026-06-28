@@ -155,6 +155,9 @@ object ProotManager {
     // Gondoskodunk róla, hogy a login shell betöltse a ~/.bashrc-t (lásd lent).
     ensureLoginSourcesBashrc(distro)
 
+    // D-Bus session bus a GUI appoknak (rpi-imager, GTK/Qt eszközök, értesítések).
+    ensureDbusSession(distro)
+
     // Guest-oldali kompat-shimek (systemctl/dmesg/journalctl/loginctl) a
     // rootfs /usr/local/bin-jébe — minden indításkor frissítve.
     ProotShims.install(rootfs)
@@ -411,6 +414,52 @@ object ProotManager {
         "# Created by NeoTerm: load ~/.bashrc in login shells so PATH additions\n" +
           "# (e.g. ~/.local/bin for pip/npm/claude installs) take effect.\n" +
           "if [ -f \"\$HOME/.bashrc\" ]; then . \"\$HOME/.bashrc\"; fi\n"
+      )
+    }
+  }
+
+  /**
+   * Provide a D-Bus **session** bus inside the distro. proot has no
+   * systemd/user session to start one, so many GUI apps log "Failed to connect
+   * to the bus" / "No D-Bus session bus available" (e.g. Raspberry Pi Imager) and
+   * lose notifications, portals, gsettings, single-instance handling, etc.
+   *
+   * We drop a `/etc/profile.d` snippet that every login shell sources: it lazily
+   * starts a private session daemon at a fixed socket under `$XDG_RUNTIME_DIR`,
+   * reuses a live one across shells/tabs (pidfile liveness check), cleans a stale
+   * socket, and exports `DBUS_SESSION_BUS_ADDRESS`. It is a complete no-op when
+   * `dbus-daemon` isn't installed, so a CLI-only setup is unaffected. Apps
+   * launched from the terminal inherit the address. Rewritten each launch so
+   * improvements ship; cheap.
+   */
+  internal fun ensureDbusSession(distro: Distro) {
+    runCatching {
+      val dir = File(distro.rootfsPath(), "etc/profile.d")
+      if (!dir.isDirectory && !dir.mkdirs()) return
+      File(dir, "95-neoterm-dbus.sh").writeText(
+        "# Created by NeoTerm: lazily provide a D-Bus session bus for GUI apps.\n" +
+          "# No-op unless dbus-daemon is installed (then GUI apps get a working bus).\n" +
+          "if command -v dbus-daemon >/dev/null 2>&1; then\n" +
+          "  : \"\${XDG_RUNTIME_DIR:=/tmp}\"\n" +
+          "  [ -d \"\$XDG_RUNTIME_DIR\" ] || mkdir -p \"\$XDG_RUNTIME_DIR\" 2>/dev/null\n" +
+          "  _ntb=\"\$XDG_RUNTIME_DIR/dbus-session\"\n" +
+          "  _ntp=\"\$XDG_RUNTIME_DIR/dbus-session.pid\"\n" +
+          "  _ntpid=\"\"; [ -r \"\$_ntp\" ] && _ntpid=\"\$(cat \"\$_ntp\" 2>/dev/null)\"\n" +
+          "  _ntok=0\n" +
+          "  # Live only if the socket exists AND the pid is a running dbus-daemon\n" +
+          "  # (the /proc/comm check rejects a recycled pid, so we never export a\n" +
+          "  # stale address that would make apps fail to connect).\n" +
+          "  if [ -S \"\$_ntb\" ] && [ -n \"\$_ntpid\" ] && kill -0 \"\$_ntpid\" 2>/dev/null; then\n" +
+          "    case \"\$(cat \"/proc/\$_ntpid/comm\" 2>/dev/null)\" in dbus-daemon*) _ntok=1 ;; esac\n" +
+          "  fi\n" +
+          "  if [ \"\$_ntok\" != 1 ]; then\n" +
+          "    rm -f \"\$_ntb\" \"\$_ntp\" 2>/dev/null\n" +
+          "    command -v dbus-uuidgen >/dev/null 2>&1 && dbus-uuidgen --ensure >/dev/null 2>&1\n" +
+          "    dbus-daemon --session --address=\"unix:path=\$_ntb\" --fork --print-pid >\"\$_ntp\" 2>/dev/null\n" +
+          "  fi\n" +
+          "  [ -S \"\$_ntb\" ] && export DBUS_SESSION_BUS_ADDRESS=\"unix:path=\$_ntb\"\n" +
+          "  unset _ntb _ntp _ntpid _ntok\n" +
+          "fi\n"
       )
     }
   }

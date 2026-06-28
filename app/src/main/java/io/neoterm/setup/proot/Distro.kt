@@ -46,8 +46,10 @@ enum class Distro(
       // *client* (libpulse + pactl/paplay) lets apps reach NeoTerm's Android-side
       // PulseAudio server on PULSE_SERVER=127.0.0.1:4713 — no distro server.
       // ffmpeg/libavcodec-extra provide browser media codecs (AAC/H.264).
-      "apk" -> "xterm openbox font-dejavu xrandr xkeyboard-config pulseaudio-utils ffmpeg"
-      "pacman" -> "xterm openbox xorg-xrandr ttf-dejavu xkeyboard-config libpulse ffmpeg"
+      // `dbus` ships dbus-daemon so GUI apps get a session bus (see
+      // ProotManager.ensureDbusSession); apt's dbus-x11 already pulls it in.
+      "apk" -> "xterm openbox font-dejavu xrandr xkeyboard-config pulseaudio-utils ffmpeg dbus"
+      "pacman" -> "xterm openbox xorg-xrandr ttf-dejavu xkeyboard-config libpulse ffmpeg dbus"
       else -> "xterm openbox x11-xserver-utils dbus-x11 fonts-dejavu xkb-data pulseaudio-utils libavcodec-extra"
     }
 

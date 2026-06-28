@@ -86,6 +86,10 @@ own process); there is **no separate app to install**.
   the built-in "X11 environment" setup.
 - Sensible defaults are pre-set for desktop apps under proot (browser sandbox
   flags, no xdg-desktop-portal stalls).
+- A **D-Bus session bus** is started automatically (proot has no systemd/user
+  session to provide one), so apps that need it — notifications, GSettings,
+  single-instance handling, Raspberry Pi Imager — no longer fail with
+  "No D-Bus session bus available".
 
 ## Audio — output and microphone
 
