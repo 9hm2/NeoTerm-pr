@@ -821,8 +821,9 @@ object CameraBridge {
     CID_CAMERA_SEL -> ctrlFacing
     CID_FOCUS_ABS -> ctrlFocusAbs
     CID_EXPOSURE_AUTO -> ctrlExpAuto
-    CID_EXPOSURE_ABS -> ctrlExpAbs
-    CID_GAIN -> ctrlIso
+    // Lazily seed manual exposure/ISO to a valid default so reads aren't < min.
+    CID_EXPOSURE_ABS -> { if (ctrlExpAbs == 0) ctrlExpAbs = expRange100us().first; ctrlExpAbs }
+    CID_GAIN -> { if (ctrlIso == 0) ctrlIso = isoRange().lower; ctrlIso }
     else -> null
   }
 
