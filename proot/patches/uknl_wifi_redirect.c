@@ -341,9 +341,15 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			UKW_RET(total);   /* report all bytes "sent" */
 		}
 		/* recvmsg: first drain a stashed command reply (W3b-2); else, on a
-		 * subscribed event socket, deliver one async event (NEW_SCAN_RESULTS). */
+		 * subscribed event socket, deliver one async event (NEW_SCAN_RESULTS).
+		 * MSG_PEEK (libnl sizes the reply with a peek before the real read): copy
+		 * but DON'T consume, else the real read finds the stash empty and libnl
+		 * fails (this is what made GETFAMILY resolve to "nl80211 not found"). */
+		int recv_flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+		int peek = (recv_flags & 2 /* MSG_PEEK */) != 0;
 		int copied = 0;
 		if (w->reply && w->roff < w->rlen) {
+			int roff0 = w->roff;
 			for (unsigned long i = 0; i < niov && w->roff < w->rlen; i++) {
 				int want = (int) iov[i].iov_len, avail = w->rlen - w->roff;
 				int n = want < avail ? want : avail;
@@ -351,6 +357,7 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 				if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, w->reply + w->roff, (word_t) n) < 0) break;
 				w->roff += n; copied += n;
 			}
+			if (peek) w->roff = roff0;   /* peek must not consume */
 		} else if (w->sub) {
 			uint8_t ev[2048]; unsigned cur = w->last_gen;
 			int el = ukw_event(w->last_gen, &cur, ev, sizeof ev);

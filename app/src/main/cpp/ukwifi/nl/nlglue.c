@@ -7,6 +7,7 @@
 #include "sysfs.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 int uknl_debug = 0;   /* UK_NL_DEBUG -> 1 */
 
@@ -60,12 +61,21 @@ void ukw_nl_register(void)
 	nl80211_register();
 }
 
+static void ukw_hexdump(const char *tag, const uint8_t *p, size_t n)
+{
+	if (!uknl_debug) return;
+	fprintf(stderr, "[uknl] %s (%zu b):", tag, n);
+	for (size_t i = 0; i < n && i < 128; i++) fprintf(stderr, " %02x", p[i]);
+	fprintf(stderr, "%s\n", n > 128 ? " ..." : "");
+}
 int ukw_nl_dispatch(const uint8_t *in, size_t len, uint8_t *out, size_t cap)
 {
 	struct nl_buf b; nlb_init(&b);
+	ukw_hexdump("NL req", in, len);
 	nl_dispatch(in, len, &b);
 	size_t n = b.len < cap ? b.len : cap;
 	if (n && out) memcpy(out, b.data, n);
+	ukw_hexdump("NL resp", b.data, b.len);
 	nlb_free(&b);
 	return (int) n;
 }
