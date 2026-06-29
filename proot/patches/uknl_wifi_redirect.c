@@ -350,13 +350,14 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			}
 			uint8_t rep[16384];
 			int rl = ukw_nl_call(w->is_route ? UKW_OP_RTNL : UKW_OP_NL, reqbuf, total, rep, sizeof rep);
-			/* iproute2 sends requests with nlmsg_pid=0 and ACCEPTS a reply only if
-			 * its nlmsg_pid equals the socket's own bound port; the daemon echoes the
-			 * request pid (0), so iproute2 skips every reply and busy-loops. Rewrite
-			 * each reply nlmsghdr's nlmsg_pid (offset 12) to the socket's real local
-			 * port (getsockname on the placeholder netlink socket). libnl already
-			 * uses its local port in requests, so this is a no-op for it. */
-			if (rl > 0) {
+			/* iproute2 (rtnl) sends requests with nlmsg_pid=0 and ACCEPTS a reply only
+			 * if its nlmsg_pid equals the socket's own bound port; the daemon echoes
+			 * the request pid (0), so iproute2 skips every reply and busy-loops.
+			 * Rewrite each reply nlmsghdr's nlmsg_pid (offset 12) to the socket's real
+			 * local port (getsockname). ONLY for rtnl: libnl (genl) already puts its
+			 * own port in requests and the daemon echoes it, so genl needs no stamp —
+			 * and stamping it regressed the genl path. */
+			if (rl > 0 && w->is_route) {
 				struct uk_snl_l { uint16_t f, pad; uint32_t pid, grp; } la;
 				socklen_t ll = sizeof la;
 				if (getsockname(fd, (void *) &la, &ll) == 0 && la.pid != 0) {
