@@ -57,7 +57,8 @@ target_compile_options(ukwifi_kshim PRIVATE ${UKW_CFLAGS} -DKBUILD_MODNAME="ukwi
 # ============================================================================
 add_library(ukwifi_user OBJECT
   ${UKW_DIR}/hcd/usbfs_hcd.c        # URB <-> USBDEVFS over the io.neoterm.usb fd
-  ${UKW_DIR}/hcd/mock_hcd.c)        # device-less HCD backend (testing)
+  ${UKW_DIR}/hcd/mock_hcd.c         # device-less HCD backend (testing)
+  ${UKW_DIR}/server/modmgr.c)       # modprobe/rmmod/lsmod -> dlopen vendor driver .so
 target_compile_options(ukwifi_user PRIVATE ${UKW_CFLAGS} -idirafter ${UKW_INC})
 
 # ============================================================================

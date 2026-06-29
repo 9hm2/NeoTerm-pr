@@ -12,6 +12,7 @@
  */
 #include "ukernel/runtime.h"
 #include "ukernel/proxy.h"
+#include "modmgr.h"
 #include <linux/ioctl.h>      /* _IOC_SIZE — a mi fejlécünk */
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,6 +98,23 @@ static void *conn_thread(void *arg)
 			while (rest) { uint32_t c = rest > sizeof(drain) ? sizeof(drain) : rest;
 				if (read_full(fd, drain, c)) break; rest -= c; }
 			if (rest) break;
+		}
+
+		/* === modul-kezelés: modprobe / rmmod / lsmod === */
+		if (req.op == UK_OP_MODPROBE) {
+			char name[64]; snprintf(name, sizeof name, "%.*s", (int)len, payload);
+			send_rsp(fd, ukw_modprobe(name), NULL, 0);
+			continue;
+		}
+		if (req.op == UK_OP_RMMOD) {
+			char name[64]; snprintf(name, sizeof name, "%.*s", (int)len, payload);
+			send_rsp(fd, ukw_rmmod(name), NULL, 0);
+			continue;
+		}
+		if (req.op == UK_OP_LSMOD) {
+			char list[4096]; int n = ukw_lsmod(list, sizeof list);
+			send_rsp(fd, n, list, (uint32_t)(n > 0 ? n : 0));
+			continue;
 		}
 
 		/* === vezeték nélküli opok (nem kell megnyitott file) === */
@@ -413,6 +431,13 @@ int main(int argc, char **argv)
 	A.file_poll    = must_sym(sh, "ukernel_file_poll");
 	A.file_close   = must_sym(sh, "ukernel_file_close");
 
+	/* module manager: `modprobe`/`rmmod`/`lsmod` from the guest load/unload the
+	 * pre-built vendor driver .so. Modules live next to the daemon by default
+	 * (the app's lib dir), overridable via $UK_WIFI_MODDIR. */
+	char argv0[1024]; snprintf(argv0, sizeof argv0, "%s", argv[0]);
+	struct ukw_mod_ops mops = { A.run_inits, A.run_exits, A.enumerate_and_probe };
+	ukw_modmgr_init(dirname(argv0), &mops, (uint16_t)vid, (uint16_t)pid);
+
 	A.set_loglevel(loglevel);
 	const struct ukernel_hcd_ops *ops = strcmp(hcd, "mock") == 0 ? A.hcd_mock() : A.hcd_usbfs();
 	printf("uServer: HCD backend = %s\n", ops->name);
@@ -422,8 +447,12 @@ int main(int argc, char **argv)
 	 * Mind RTLD_GLOBAL, hogy a későbbi modulok a korábbiak szimbólumait lássák. */
 	for (int i = 0; i < nmodules; i++) {
 		printf("uServer: modul betöltése [%d/%d]: %s\n", i + 1, nmodules, modules[i]);
-		if (!dlopen(modules[i], RTLD_NOW | RTLD_GLOBAL)) {
-			fprintf(stderr, "uServer: modul dlopen hiba: %s\n", dlerror()); return 3; }
+		void *mh = dlopen(modules[i], RTLD_NOW | RTLD_GLOBAL);
+		if (!mh) { fprintf(stderr, "uServer: modul dlopen hiba: %s\n", dlerror()); return 3; }
+		/* register for lsmod (basename without dir / .so suffix) */
+		char nb[128]; snprintf(nb, sizeof nb, "%s", basename(modules[i]));
+		char *dot = strstr(nb, ".so"); if (dot) *dot = 0;
+		ukw_modmgr_note(nb, mh, 0);
 	}
 
 	/* vezeték nélküli API felderítése (ha valamelyik modul — pl. cfg80211.so —

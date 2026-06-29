@@ -35,6 +35,11 @@ enum uk_proxy_op {
 	UK_OP_SET_IFADDR = 25, /* cmd = netdev idx; payload = [u32 ip][u32 netmask] (0 ip = törlés) */
 	UK_OP_SET_MTU    = 26, /* cmd = (netdev_idx<<16)|mtu */
 	UK_OP_SET_MAC    = 27, /* cmd = netdev idx; payload = 6 bájt MAC (macchanger/ip set address) */
+	/* modul-kezelés: a guest `modprobe`/`rmmod`/`lsmod` parancsai a daemonon át
+	 * a (előre fordított) vendor driver .so be-/kitöltését vezérlik. */
+	UK_OP_MODPROBE   = 30, /* payload = modulnév (pl. "rtl8812au"); ret = 0/hiba */
+	UK_OP_RMMOD      = 31, /* payload = modulnév; ret = 0/hiba */
+	UK_OP_LSMOD      = 32, /* válasz payload = /proc/modules szöveg; ret = hossz */
 };
 
 /* kulcs-telepítés a 4-way handshake után */

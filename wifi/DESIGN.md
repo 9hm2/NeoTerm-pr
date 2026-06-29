@@ -92,14 +92,39 @@ the same at the syscall layer (this is the new `uknl_wifi_redirect.c`, gated by
 - **`socket(AF_INET, …, IPPROTO_ICMP)`** → `ping` over the chip (or rely on the
   guest's own stack once an IP is configured; see §6 limits).
 - **wext `ioctl`s** (`SIOCGIWFREQ`, `SIOCSIWMODE`, `SIOCGIFHWADDR`, …) → daemon.
-- **`/sys/class/net/*` and `/sys/class/ieee80211/*` reads** → the fake sysfs
-  bridge (no redirect needed; it's a bound tree, like `/sys/block`).
+- **`init_module`/`finit_module`/`delete_module`** (from `modprobe`/`rmmod`) →
+  `UK_OP_MODPROBE`/`UK_OP_RMMOD` (see Module management below).
+- **`/sys/class/net/*`, `/sys/class/ieee80211/*` reads** → the fake sysfs bridge
+  (bound tree, like `/sys/block`); **`/proc/modules` read** → `UK_OP_LSMOD`.
 - **`if_nametoindex`** resolves against the fake `/sys/class/net/wlan0`.
 
 Because proot already binds real mounts and traps sockets per‑`UK_*` gate, this
 slots in beside the USB/cam/block redirects with the same machinery
 (`set_sysnum(PR_void)` + poke result, or socketpair substitution as the USB shim
 does for netlink).
+
+### Module management — standard `modprobe` / `lsmod` / `rmmod`
+
+Requirement: the driver is operated with the **standard kernel‑module commands**
+from the guest, even though under the hood it is a pre‑built vendor `.so` (the
+`.ko` path was rejected). The mapping:
+
+- **`modprobe <name>`** → the guest's modprobe resolves a (placeholder) module and
+  issues `finit_module`/`init_module`; the `UK_WIFI` redirect intercepts that
+  syscall, extracts the module **name**, and sends `UK_OP_MODPROBE name` to the
+  daemon. The daemon's **module manager** (`server/modmgr.c`) resolves
+  `<moddir>/<name>.so` (or `lib<name>.so`), `dlopen`s it (so it resolves
+  cfg80211/usb/shim from the daemon image), runs its `module_init`, and probes the
+  device — exactly the load path uKernel already uses, now keyed by name.
+- **`lsmod`** → reads `/proc/modules`; the redirect serves that read from
+  `UK_OP_LSMOD` (the manager emits real `/proc/modules` lines: `name size refcount
+  deps state addr`).
+- **`rmmod <name>` / `modprobe -r`** → `delete_module` → `UK_OP_RMMOD name` →
+  `module_exit` + `dlclose`.
+
+So `modprobe 88XXau` / `lsmod` / `rmmod 88XXau` behave as on a normal Linux box;
+the actual driver `.so`s ship in the module dir (`$UK_WIFI_MODDIR`, default the
+app lib dir) and are added later — the framework provides the mechanism now.
 
 ---
 

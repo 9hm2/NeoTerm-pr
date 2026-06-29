@@ -80,6 +80,27 @@ cmake -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
 cmake --build /tmp/ukw/out --target ukwifid     # -> libukwifid.so
 ```
 
+## W0c — module manager (modprobe / lsmod / rmmod backend) ✅ (links)
+
+The guest must operate the driver with the **standard kernel‑module commands**
+(the `.ko` path stays rejected — the driver is still a pre‑built `.so` under the
+hood). Added the daemon backend:
+
+- `server/modmgr.c` (+ `modmgr.h`): a name→`.so` registry. `ukw_modprobe(name)`
+  resolves `<moddir>/<name>.so` (or `lib<name>.so`; moddir = `$UK_WIFI_MODDIR` or
+  the daemon's own dir), `dlopen`s it, runs `module_init`, probes the chip.
+  `ukw_rmmod(name)` = `module_exit` + `dlclose`. `ukw_lsmod()` emits real
+  `/proc/modules` lines.
+- `proxy.h`: new ops `UK_OP_MODPROBE` (30), `UK_OP_RMMOD` (31), `UK_OP_LSMOD` (32)
+  — additive, ukfs does not use `proxy.h`.
+- `userver.c`: inits the manager, registers argv‑loaded modules for `lsmod`, and
+  serves the three ops on `io.neoterm.wifi`.
+
+`libukwifid.so` rebuilds with the manager (links, 0 errors; exports `ukw_modprobe`
+/`ukw_rmmod`/`ukw_lsmod`/`ukw_modmgr_init`). The **guest‑side glue** (the
+`UK_WIFI` redirect of `init_module`/`finit_module`/`delete_module` → these ops,
+and `/proc/modules` read → `UK_OP_LSMOD`) is part of W3.
+
 ## Next (not done)
 
 - **W1+** — per `DESIGN.md`: `UsbWifiBridge.kt` launch + chip claim; bring a
