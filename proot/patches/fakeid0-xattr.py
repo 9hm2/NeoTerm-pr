@@ -1126,11 +1126,28 @@ if 'uk_wifi_sysnums' not in s:
                   '\t\t\t{ PR_finit_module,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_init_module,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_delete_module,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_socket,\tFILTER_SYSEXIT },\t/* mark nl80211 genl sockets */\n'
+                  '\t\t\t{ PR_sendmsg,\tFILTER_SYSEXIT },\t/* ferry netlink -> io.neoterm.wifi */\n'
+                  '\t\t\t{ PR_recvmsg,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_close,\tFILTER_SYSEXIT },\n'
                   '\t\t\tFILTERED_SYSNUM_END,\n'
                   '\t\t};\n'
                   '\t\tstatus = merge_filtered_sysnums(tracee->ctx, &filtered_sysnums, uk_wifi_sysnums);\n'
                   '\t}', 1)
     wr(SC, s)
+
+# ---- syscall/exit.c: mark nl80211 genl sockets at socket() EXIT (the fd is only
+#      known here), so the wifi redirect can ferry their sendmsg/recvmsg. ----
+EX = ROOT + "/syscall/exit.c"; s = rd(EX)
+if 'uknl_wifi_mark_socket' not in s:
+    must('void translate_syscall_exit(Tracee *tracee)\n{' in s, "exit.c translate_syscall_exit anchor (wifi)")
+    s = s.replace('void translate_syscall_exit(Tracee *tracee)\n{',
+                  'extern void uknl_wifi_mark_socket(Tracee *tracee);\n'
+                  'void translate_syscall_exit(Tracee *tracee)\n{', 1)
+    ex_anchor = '\tstatus = notify_extensions(tracee, SYSCALL_EXIT_START, 0, 0);'
+    must(ex_anchor in s, "exit.c SYSCALL_EXIT_START anchor (wifi)")
+    s = s.replace(ex_anchor, '\tuknl_wifi_mark_socket(tracee);\n' + ex_anchor, 1)
+    wr(EX, s)
 
 # ---- syscall/seccomp.c: trap the camera I/O syscalls only when UK_CAM is set. ----
 SC = ROOT + "/syscall/seccomp.c"; s = rd(SC)

@@ -174,13 +174,37 @@ Host-validated (gcc, the engine is portable C): `CTRL_CMD_GETFAMILY("nl80211")`
 returns family id `0x24`; `NL80211_CMD_GET_INTERFACE` returns `wlan0`. Daemon
 links clean (NDK aarch64/bionic; `ukw_nl_dispatch`/`nl80211_register` exported).
 
+## W3b-2 — proot genl netlink ferry (synchronous) ✅ (host-validated)
+
+`uknl_wifi_redirect.c` now ferries the guest's nl80211/genl netlink socket to the
+daemon:
+- **mark** at `socket()` EXIT (`uknl_wifi_mark_socket`, called from
+  `translate_syscall_exit`): only `AF_NETLINK` + `NETLINK_GENERIC` fds are tracked
+  (rtnetlink/uevent left alone), keyed by (tgid, fd).
+- **sendmsg** on a marked fd: gather the iov into the raw netlink request, send it
+  as `UK_OP_NL` to `@io.neoterm.wifi`, stash the reply; report all bytes sent.
+- **recvmsg**: drain the stashed reply into the iov (offset-tracked across calls;
+  `-EAGAIN` once empty); zero msg_namelen/controllen.
+- **close**: free the entry.
+- Seccomp (`UK_WIFI`): traps `socket`/`sendmsg`/`recvmsg`/`close` (+ the W3a module
+  syscalls).
+
+Host-validated through the rebuilt proot end to end: a guest
+`socket(AF_NETLINK,SOCK_RAW,NETLINK_GENERIC)` + `sendmsg(CTRL_CMD_GETFAMILY
+"nl80211")` + `recvmsg` got 228 bytes back with `CTRL_ATTR_FAMILY_ID = 0x24`,
+ferried through a stub `@io.neoterm.wifi` running the real nl engine. So
+synchronous genl/nl80211 commands (`iw dev`, `iw list`, `iw dev wlan0 info/link`,
+GET_SCAN dump, CONNECT, NEW_KEY) work from the guest.
+
 ## Next (not done)
 
-- **W3b-2** — the proot transport + events: `uknl_wifi_redirect.c` intercepts
-  `socket(AF_NETLINK GENERIC/ROUTE)` (mark the fd) and ferries `sendmsg`/`recvmsg`
-  to `@io.neoterm.wifi` `UK_OP_NL`; plus async **multicast events**
-  (NEW_SCAN_RESULTS / MLME) delivered on the guest's event socket (poll/recvmsg),
-  which `iw scan` / `wpa_supplicant` need. Then `AF_PACKET` (monitor/EAPOL) and
-  rtnetlink (`ip link`) — the more preload-entangled `bridge/{rtnetlink,packet_sock}.c`.
+- **W3b-3** — async **multicast events**: the daemon pushes NEW_SCAN_RESULTS / MLME
+  to subscribed guest sockets; proot delivers them via `poll`/`recvmsg` on the
+  marked event fd (needs `uknl_mcast_send` wired to a per-fd event queue +
+  `setsockopt(NETLINK_ADD_MEMBERSHIP)` tracking + a poll emulation like the USB
+  shim). Required by `iw scan` / `wpa_supplicant`'s event loop.
+- **W3b-4** — `AF_PACKET` (monitor RX / injection / EAPOL) and rtnetlink (`ip
+  link`): the more preload-entangled `bridge/{packet_sock,rtnetlink}.c`.
+- A chip's vendor driver `.so` in the module dir → end-to-end on device.
 - A chip's vendor driver `.so` (built against the shim, like the proven
   `rtl8812au`) dropped into the module dir — then end‑to‑end on device.

@@ -30,6 +30,7 @@ struct ukw_req { uint32_t op, cmd, len; };
 struct ukw_rsp { int32_t ret; uint32_t len; };
 #define UKW_OP_MODPROBE 30
 #define UKW_OP_RMMOD    31
+#define UKW_OP_NL       33
 
 /* Connect to the daemon's abstract socket @io.neoterm.wifi. */
 static int ukw_connect(void)
@@ -61,6 +62,63 @@ static int ukw_call(uint32_t op, const char *name)
 	return rc;
 }
 
+/* Send a raw netlink request (UK_OP_NL) and read the raw reply; returns reply
+ * length, or <0 on transport error. */
+static int ukw_nl_call(const uint8_t *req, int reqlen, uint8_t *out, int outcap)
+{
+	int s = ukw_connect(); if (s < 0) return -1;
+	struct ukw_req r = { UKW_OP_NL, 0, (uint32_t) reqlen };
+	int rc = -1;
+	if (write(s, &r, sizeof r) == (ssize_t) sizeof r &&
+	    (reqlen == 0 || write(s, req, (size_t) reqlen) == (ssize_t) reqlen)) {
+		struct ukw_rsp rs;
+		if (read(s, &rs, sizeof rs) == (ssize_t) sizeof rs) {
+			int len = (int) rs.len; if (len > outcap) len = outcap;
+			int got = 0;
+			while (got < len) { ssize_t k = read(s, out + got, (size_t)(len - got)); if (k <= 0) break; got += (int) k; }
+			rc = got;
+		}
+	}
+	close(s);
+	return rc;
+}
+
+/* Per-(tgid,genl-fd) state: a guest nl80211/genl netlink socket whose sendmsg is
+ * ferried to the daemon (UK_OP_NL) and whose reply is drained by recvmsg. */
+struct wnl_fd { int used, pid, fd; uint8_t *reply; int rlen, roff; };
+#define WNL_MAX 32
+static struct wnl_fd g_wnl[WNL_MAX];
+static int g_nwnl;
+static struct wnl_fd *wnl_get(int pid, int fd, int create)
+{
+	for (int i = 0; i < g_nwnl; i++)
+		if (g_wnl[i].used && g_wnl[i].pid == pid && g_wnl[i].fd == fd) return &g_wnl[i];
+	if (!create) return NULL;
+	int slot = -1;
+	for (int i = 0; i < g_nwnl; i++) if (!g_wnl[i].used) { slot = i; break; }
+	if (slot < 0) { if (g_nwnl >= WNL_MAX) return NULL; slot = g_nwnl++; }
+	struct wnl_fd *w = &g_wnl[slot];
+	memset(w, 0, sizeof *w); w->used = 1; w->pid = pid; w->fd = fd;
+	return w;
+}
+static void wnl_free(struct wnl_fd *w) { if (w) { free(w->reply); memset(w, 0, sizeof *w); } }
+
+/* Mark a genl (NETLINK_GENERIC) socket at socket() EXIT so its sendmsg/recvmsg
+ * get ferried. Called from translate_syscall_exit. Only NETLINK_GENERIC (nl80211)
+ * — NETLINK_ROUTE/uevent are left alone (rtnetlink = a later step; the libusb
+ * uevent socket is the USB shim's). */
+void uknl_wifi_mark_socket(Tracee *tracee)
+{
+	if (!uk_wifi_on()) return;
+	if (get_sysnum(tracee, ORIGINAL) != PR_socket) return;
+	int domain = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
+	int proto  = (int) peek_reg(tracee, ORIGINAL, SYSARG_3);
+	if (domain != 16 /* AF_NETLINK */ || proto != 16 /* NETLINK_GENERIC */) return;
+	int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	if (fd < 0) return;
+	wnl_get(ukfs_tgid(tracee->pid), fd, 1);
+}
+
 /* basename of a module path/fd-link -> bare module name: strip dirs, a leading
  * "memfd:" (kmod decompresses into a memfd named after the module), and a
  * trailing ".ko"/".ko.xz"/".ko.zst"/".ko.gz". */
@@ -81,6 +139,53 @@ static void ukw_modname(const char *path, char *out, size_t osz)
 static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 {
 	if (!uk_wifi_on()) return false;
+
+	/* ---- genl netlink ferry: sendmsg/recvmsg/close on a marked nl80211 fd ---- */
+	if (nr == PR_close) {
+		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1), 0);
+		if (w) wnl_free(w);
+		return false;   /* let the real close run on the placeholder netlink fd */
+	}
+	if (nr == PR_sendmsg || nr == PR_recvmsg) {
+		int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), fd, 0);
+		if (!w) return false;   /* not a marked nl80211 socket -> normal handling */
+		struct msghdr mh; memset(&mh, 0, sizeof mh);
+		if (read_data(tracee, &mh, peek_reg(tracee, CURRENT, SYSARG_2), sizeof mh) < 0) return false;
+		unsigned long niov = (unsigned long) mh.msg_iovlen;
+		if (niov > 8) niov = 8;
+		struct iovec iov[8];
+		if (niov && read_data(tracee, iov, (word_t)(uintptr_t) mh.msg_iov, niov * sizeof(struct iovec)) < 0) return false;
+
+		if (nr == PR_sendmsg) {
+			uint8_t reqbuf[16384]; int total = 0;
+			for (unsigned long i = 0; i < niov; i++) {
+				int l = (int) iov[i].iov_len;
+				if (l <= 0 || total + l > (int) sizeof reqbuf) break;
+				if (read_data(tracee, reqbuf + total, (word_t)(uintptr_t) iov[i].iov_base, (word_t) l) < 0) break;
+				total += l;
+			}
+			uint8_t rep[16384];
+			int rl = ukw_nl_call(reqbuf, total, rep, sizeof rep);
+			free(w->reply); w->reply = NULL; w->rlen = 0; w->roff = 0;
+			if (rl > 0) { w->reply = (uint8_t *) malloc(rl); if (w->reply) { memcpy(w->reply, rep, rl); w->rlen = rl; } }
+			UKW_RET(total);   /* report all bytes "sent" */
+		}
+		/* recvmsg: drain the stashed reply into the iov buffers */
+		if (!w->reply || w->roff >= w->rlen) UKW_RET(-EAGAIN);
+		int copied = 0;
+		for (unsigned long i = 0; i < niov && w->roff < w->rlen; i++) {
+			int want = (int) iov[i].iov_len, avail = w->rlen - w->roff;
+			int n = want < avail ? want : avail;
+			if (n <= 0) continue;
+			if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, w->reply + w->roff, (word_t) n) < 0) break;
+			w->roff += n; copied += n;
+		}
+		/* a netlink dgram socket reports no src address / no control data */
+		mh.msg_namelen = 0; mh.msg_controllen = 0; mh.msg_flags = 0;
+		write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), &mh, sizeof mh);
+		UKW_RET(copied);
+	}
 
 	if (nr == PR_finit_module) {
 		int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
