@@ -349,3 +349,21 @@ host parity); the `.ko` stays as a depmod/modinfo-compat carrier.
   uKernel project already demonstrated standalone. Expect iteration on timing/edge
   cases (the parts only a real chip + AP exercise) and on shim-symbol gaps
   surfaced by the specific driver at `dlopen`.
+
+## On-device: driver loads + probes the real chip ✅ (control plane WIP)
+
+`modprobe rtl8812au` on a real RTL8811AU (2357:011e) now: dlopen OK → module_init
+→ usb_register → usbfs probe over io.neoterm.usb → cfg80211 wiphy 'phy0' (2.4+5GHz)
+→ register_netdev('wlan0') → "probe -> 1 eszköz"; `lsmod` lists it. The full load
+chain is solved: seccomp-blocked finit_module bypassed by guest wrappers talking
+to the daemon directly; Android W^X handled (wrappers on tmpfs); $UK_WIFI_MODDIR
+honored; .so given DT_NEEDED libc.so so bionic resolves libc; init_net + remaining
+shim globals provided.
+
+Remaining: the nl80211 control plane. `iw` failed with "Failed to connect to
+generic netlink" because Android SELinux denies NETLINK_GENERIC sockets to app
+uids (proven: socket(NETLINK_GENERIC)=EACCES, NETLINK_ROUTE=OK). Fix: the proot
+redirect now rewrites a guest NETLINK_GENERIC socket to a real NETLINK_ROUTE one
+(allowed) so socket/bind/getsockname work natively for libnl, while its genl
+traffic is still marked is_genl and ferried to the daemon (UK_OP_NL). Next:
+on-device iw scan → wpa_supplicant → DHCP → ping.

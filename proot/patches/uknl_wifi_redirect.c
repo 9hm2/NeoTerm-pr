@@ -228,11 +228,21 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 	 * it to a harmless AF_UNIX SOCK_DGRAM (keeping CLOEXEC/NONBLOCK flags) — the
 	 * guest gets a valid fd that we mark (at exit) and whose I/O we ferry. */
 	if (nr == PR_socket) {
-		if ((int) peek_reg(tracee, CURRENT, SYSARG_1) == 17 /* AF_PACKET */) {
+		int dom = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+		if (dom == 17 /* AF_PACKET */) {
 			int t = (int) peek_reg(tracee, CURRENT, SYSARG_2);
 			poke_reg(tracee, SYSARG_1, 1 /* AF_UNIX */);
 			poke_reg(tracee, SYSARG_2, (word_t)((t & ~0xff) | 2 /* SOCK_DGRAM */));
 			poke_reg(tracee, SYSARG_3, 0);
+		} else if (dom == 16 /* AF_NETLINK */ &&
+		           (int) peek_reg(tracee, CURRENT, SYSARG_3) == 16 /* NETLINK_GENERIC */) {
+			/* Android/SELinux denies NETLINK_GENERIC for app uids (proven: EACCES),
+			 * so create a real NETLINK_ROUTE socket instead (allowed) — bind/
+			 * getsockname then work natively for libnl. It's marked is_genl at exit
+			 * (from ORIGINAL proto=16), and its genl traffic (GETFAMILY, nl80211) is
+			 * ferried to the daemon (UK_OP_NL); the route socket is never used for
+			 * real netlink I/O. */
+			poke_reg(tracee, SYSARG_3, 0 /* NETLINK_ROUTE */);
 		}
 		return false;   /* let it run; marked at exit from ORIGINAL args */
 	}
