@@ -65,6 +65,10 @@ object UsbWifiBridge {
     proc = try {
       ProcessBuilder(bin, "--serve", "--sock", SOCKET, "--hcd", "usbfs")
         .apply {
+          // nl80211 engine tracing into ukwifid.log (GETFAMILY/commands/events) —
+          // invaluable while bringing a chip up; the log is app-private, not noisy
+          // for the user.
+          environment()["UK_NL_DEBUG"] = "1"
           // where the daemon writes the fake /sys/class/net + /sys/class/ieee80211
           environment()["UK_WIFI_SYSFS_NET"] = UsbWifiSysfsBridge.netDirPath()
           environment()["UK_WIFI_SYSFS_PHY"] = UsbWifiSysfsBridge.phyDirPath()

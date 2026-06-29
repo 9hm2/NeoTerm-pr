@@ -364,8 +364,21 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			}
 		}
 		if (copied == 0) UKW_RET(-EAGAIN);
-		/* a netlink dgram socket reports no src address / no control data */
-		mh.msg_namelen = 0; mh.msg_controllen = 0; mh.msg_flags = 0;
+		/* The message is from the "kernel": libnl's nl_recv REQUIRES the source
+		 * address to be a full sockaddr_nl (msg_namelen == sizeof) with nl_family
+		 * AF_NETLINK, else it returns -NLE_NOADDR and drops the reply (this is why
+		 * GETFAMILY resolved to "nl80211 not found"). Write a kernel sockaddr_nl
+		 * (nl_pid=0, nl_groups=0) into the caller's msg_name buffer. */
+		struct uk_snl { uint16_t nl_family; uint16_t nl_pad; uint32_t nl_pid; uint32_t nl_groups; };
+		if (mh.msg_name && mh.msg_namelen >= (socklen_t) sizeof(struct uk_snl)) {
+			struct uk_snl snl; memset(&snl, 0, sizeof snl);
+			snl.nl_family = 16 /* AF_NETLINK */;
+			write_data(tracee, (word_t)(uintptr_t) mh.msg_name, &snl, sizeof snl);
+			mh.msg_namelen = (socklen_t) sizeof(struct uk_snl);
+		} else {
+			mh.msg_namelen = 0;
+		}
+		mh.msg_controllen = 0; mh.msg_flags = 0;
 		write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), &mh, sizeof mh);
 		UKW_RET(copied);
 	}
