@@ -59,6 +59,17 @@ echo "build-driver: src=$SRC  out=$OUT.so  shim=$SHIM_INC"
 echo "build-driver: install -> $MODDIR/$OUT.so   ko-name -> /lib/modules/$KVER"
 
 # --- compile flags ---------------------------------------------------------
+# Auto-discover the driver's OWN include dirs: vendor trees do `#include
+# "halrf/foo.h"` etc. and rely on their Kbuild adding a long -I list (hal/phydm,
+# hal/phydm/halrf, …). Instead of hard-coding per chip, add EVERY directory that
+# contains a header — chip-agnostic. These come AFTER $SHIM_INC so the shim still
+# wins for the kernel API (<linux/*>,<net/*>); they only satisfy the driver's
+# internal relative includes.
+DRV_INC=()
+while IFS= read -r -d '' d; do DRV_INC+=( -I"$d" ); done \
+  < <(find "$SRC" -type f \( -name '*.h' -o -name '*.hpp' \) -printf '%h\0' | sort -zu)
+echo "build-driver: ${#DRV_INC[@]} driver include dirs"
+
 # Fake kernel headers come FIRST (-I) so <linux/*>,<net/*> shadow the distro's
 # real ones; the sysroot still provides <stdint.h>, <stddef.h> etc. This mirrors
 # the ukwifi_kshim group in ukwifi.cmake exactly (same -Wno set, same -ffree-
@@ -68,7 +79,7 @@ CFLAGS=(
   -fno-common -D_GNU_SOURCE -DKBUILD_MODNAME="\"$OUT\""
   -DUKERNEL_DRIVER_BUILD -DCONFIG_IOCTL_CFG80211 -DRTW_USE_CFG80211_STA_EVENT
   -I"$SHIM_INC"                     # fake kernel API — must win
-  -I"$SRC" -I"$SRC/include" -I"$SRC/core" -I"$SRC/os_dep" -I"$SRC/hal"
+  "${DRV_INC[@]}"                   # driver's own header dirs (auto-discovered)
   # kernel-ism suppressions (clang-on-NDK set; harmless on gcc)
   -Wno-implicit-function-declaration -Wno-incompatible-pointer-types
   -Wno-unused -Wno-unused-parameter -Wno-sign-compare -Wno-missing-braces
@@ -85,15 +96,35 @@ echo "build-driver: ${#SRCS[@]} source files"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 OBJS=()
+FAILED=0
 i=0
 for s in "${SRCS[@]}"; do
   o="$WORK/obj_$i.o"; i=$((i+1))
-  if ! "$CC" "${CFLAGS[@]}" -c "$s" -o "$o" 2>"$WORK/err"; then
-    echo "build-driver: FAILED on $s" >&2; sed 's/^/  /' "$WORK/err" >&2
-    die "compile error (often a CONFIG_* you must add as -D…, see wifi/BUILD-DRIVER.md)"
+  if "$CC" "${CFLAGS[@]}" -c "$s" -o "$o" 2>"$WORK/err.$i"; then
+    OBJS+=("$o")
+  else
+    FAILED=$((FAILED+1))
+    echo "$s" >> "$WORK/failed"
+    # keep only the hard errors (drop the warning noise) for the summary
+    grep -E 'error:|fatal error:' "$WORK/err.$i" | head -3 \
+      | sed "s|^|  [$(basename "$s")] |" >> "$WORK/errsum" || true
   fi
-  OBJS+=("$o")
 done
+
+# Report ALL compile failures at once (don't die on the first) so one run
+# surfaces every distinct missing-header / missing-CONFIG, not one per re-run.
+if [ "$FAILED" -gt 0 ]; then
+  echo >&2
+  echo "build-driver: $FAILED/$i source(s) failed to compile:" >&2
+  sort -u "$WORK/errsum" >&2 2>/dev/null || cat "$WORK/errsum" >&2
+  echo >&2
+  echo "  Common causes (see wifi/BUILD-DRIVER.md → Troubleshooting):" >&2
+  echo "    'fatal error: X/Y.h: No such file' -> a driver header dir wasn't" >&2
+  echo "      auto-added (rare); pass it as an extra flag: -I\$SRC/<dir>" >&2
+  echo "    'undeclared CONFIG_FOO' / a whole feature file errors -> add" >&2
+  echo "      -DCONFIG_FOO, or exclude that source (point the script at a subdir)" >&2
+  die "compile errors above; nothing linked"
+fi
 
 # --- link: shared, libc-agnostic ------------------------------------------
 "$CC" -shared -nostdlib -fPIC -o "$WORK/$OUT.so" "${OBJS[@]}" \
