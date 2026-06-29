@@ -396,8 +396,17 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 				}
 				r = (w->reply && w->roff < w->rlen);
 			} else {
-				r = (w->reply && w->roff < w->rlen) || (w->sub && gen != w->last_gen);
+				/* subscribed genl event socket: fetch a pending event (scan or
+				 * connect/MLME) into the stash so readiness is accurate */
+				if (w->sub && !(w->reply && w->roff < w->rlen)) {
+					uint8_t ev[2048]; unsigned cur = w->last_gen;
+					int el = ukw_event(w->last_gen, &cur, ev, sizeof ev);
+					w->last_gen = cur;
+					if (el > 0) { free(w->reply); w->reply = (uint8_t *) malloc(el); if (w->reply) { memcpy(w->reply, ev, el); w->rlen = el; w->roff = 0; } }
+				}
+				r = (w->reply && w->roff < w->rlen);
 			}
+			(void) gen;
 			if (r && (pf[i].events & POLLIN)) { pf[i].revents = POLLIN; ready++; }
 		}
 		if (!ready) { struct timespec ts = { 0, 50 * 1000 * 1000 }; nanosleep(&ts, NULL); }

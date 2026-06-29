@@ -58,20 +58,23 @@ int uk_get_iface(int netdev_idx, struct uk_iface_info *out)
 
 int uk_connect(int wiphy_idx, const struct uk_connect_req *req, uint8_t *bssid_out)
 {
-	static int (*f)(size_t, const struct uk_connect_req *);
-	static int (*b)(size_t, uint8_t *);
+	/* signatures match userver.c's UK_OP_CONNECT handler exactly */
+	static int (*f)(size_t, const char *, int, const uint8_t *, int, const uint8_t *, int);
+	static int (*b)(uint8_t *);
 	if (!f) f = dlsym(RTLD_DEFAULT, "ukernel_wiphy_connect");
 	if (!b) b = dlsym(RTLD_DEFAULT, "ukernel_wiphy_conn_bssid");
-	int r = f ? f((size_t) wiphy_idx, req) : -1;
-	if (bssid_out && b) b((size_t) wiphy_idx, bssid_out);
+	int r = f ? f((size_t) wiphy_idx, req->ssid, req->ssid_len, req->bssid, req->freq, req->ie, req->ie_len) : -1;
+	if (bssid_out && b) b(bssid_out);
 	return r;
 }
 
 int uk_add_key(int wiphy_idx, const struct uk_key_req *kr)
 {
-	static int (*f)(size_t, const struct uk_key_req *);
+	/* signature matches userver.c's UK_OP_ADD_KEY handler */
+	static int (*f)(size_t, int, int, const uint8_t *, uint32_t, const uint8_t *, int, const uint8_t *, int);
 	if (!f) f = dlsym(RTLD_DEFAULT, "ukernel_wiphy_add_key");
-	return f ? f((size_t) wiphy_idx, kr) : -1;
+	return f ? f((size_t) wiphy_idx, kr->key_idx, kr->pairwise, kr->mac, kr->cipher,
+	            kr->key, kr->key_len, kr->seq, kr->seq_len) : -1;
 }
 
 int uk_set_channel(int wiphy_idx, int freq_mhz)

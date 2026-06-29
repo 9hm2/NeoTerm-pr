@@ -16,8 +16,34 @@ int uknl_debug = 0;   /* UK_NL_DEBUG -> 1 */
  * UK_OP_NL response, so the early-flush helper is a no-op (content stays in
  * resp). Async multicast events (NEW_SCAN_RESULTS, MLME, …) are W3b-2. */
 void uknl_send(struct nl_buf *b) { (void) b; }
-void uknl_mcast_send(int group, struct nl_buf *b) { (void) group; (void) b; }
 volatile unsigned uknl_scan_gen = 0;
+
+/* Generic async-event FIFO: nl80211 handlers (e.g. cmd_connect's NL80211_CMD_CONNECT
+ * on the MLME group) emit events via uknl_mcast_send; UK_OP_NL_EVENT drains them to
+ * the subscribed guest socket. (Scan results stay generation-based, see below.) */
+#define UKW_EVQ 32
+static struct { uint8_t *data; int len; } g_evq[UKW_EVQ];
+static int g_evhead, g_evtail;   /* simple ring; head==tail => empty */
+void uknl_mcast_send(int group, struct nl_buf *b)
+{
+	(void) group;
+	if (!b || b->len == 0) return;
+	int nxt = (g_evtail + 1) % UKW_EVQ;
+	if (nxt == g_evhead) return;   /* full: drop (oldest kept) */
+	uint8_t *c = (uint8_t *) malloc(b->len); if (!c) return;
+	memcpy(c, b->data, b->len);
+	g_evq[g_evtail].data = c; g_evq[g_evtail].len = (int) b->len;
+	g_evtail = nxt;
+}
+static int evq_pop(uint8_t *out, int cap)
+{
+	if (g_evhead == g_evtail) return 0;
+	int n = g_evq[g_evhead].len; if (n > cap) n = cap;
+	if (out) memcpy(out, g_evq[g_evhead].data, n);
+	free(g_evq[g_evhead].data); g_evq[g_evhead].data = NULL;
+	g_evhead = (g_evhead + 1) % UKW_EVQ;
+	return n;
+}
 void uknl_set_monitor_mode(int m) { (void) m; }   /* AF_PACKET monitor path = W3b-2 */
 
 /* Per-vif sysfs hooks: the daemon's wsysfs writer already publishes
@@ -51,6 +77,11 @@ unsigned ukw_nl_scangen(void) { return uknl_scan_gen; }
 
 int ukw_nl_event(unsigned last_gen, unsigned *cur_gen, uint8_t *out, size_t cap)
 {
+	/* generic queued events (connect/MLME/...) first — gen unchanged so the
+	 * client keeps polling for more before advancing the scan generation. */
+	int q = evq_pop(out, (int) cap);
+	if (q > 0) { if (cur_gen) *cur_gen = last_gen; return q; }
+
 	unsigned g = uknl_scan_gen;
 	if (cur_gen) *cur_gen = g;
 	if (g == last_gen) return 0;            /* no new scan results */

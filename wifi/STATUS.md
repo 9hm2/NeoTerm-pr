@@ -236,11 +236,33 @@ Host-validated through proot: a guest `socket(AF_PACKET,SOCK_RAW,htons(0x888e))`
 daemon received `EAPOL_TX len=4 first=888e` and the guest got the canned EAPOL
 frame back. So the WPA2 4-way handshake data path works from the guest.
 
+## W3b-5a — MLME/connect events ✅ (host-validated)
+
+Generic async-event FIFO so non-scan nl80211 events reach the guest:
+- daemon `nlglue.c`: `uknl_mcast_send(group, buf)` enqueues a copy into a ring;
+  `ukw_nl_event` drains the FIFO first (gen unchanged), then falls back to the
+  scan-generation path. So `cmd_connect`'s `NL80211_CMD_CONNECT` (MLME group) is
+  delivered.
+- proot: the `poll` path for a subscribed genl fd now fetches a pending event
+  (scan *or* connect/MLME) into the per-fd stash, so readiness is accurate and the
+  event isn't lost between poll and recvmsg.
+- Fixed two in-process `userver_client` adapter signatures to match `userver.c`
+  exactly (`ukernel_wiphy_connect` is 7-arg, `ukernel_wiphy_add_key` 9-arg,
+  `ukernel_wiphy_conn_bssid` 1-arg) — they were stubbed wrong and would have
+  crashed on device.
+
+Engine-validated (gcc): an `NL80211_CMD_CONNECT` request runs `cmd_connect`
+(in-process `uk_connect`) + enqueues the event; `ukw_nl_event` then returns a
+48-byte `nlmsg_type=0x24 cmd=NL80211_CMD_CONNECT`. proot + daemon rebuild clean.
+So `wpa_supplicant` gets its association result event after the CONNECT command.
+
 ## Next (not done)
 
-- **W3b-5** — rtnetlink (`ip link` up/down/addr → RTM_*; the bridge's
-  `rtnetlink.c`) and MLME/connect events (extend the event path beyond scan-gen)
-  for `ip` and the post-association `wpa_supplicant` notifications.
+- **W3b-5b** — rtnetlink (`ip link` up/down, `ip addr` → RTM_GETLINK/SETLINK/
+  NEWADDR): mark NETLINK_ROUTE sockets and route them to an in-daemon rtnetlink
+  dispatch (extract the per-message handler from the bridge's `rtnetlink.c`,
+  which is currently a preload thread loop). Needed to bring the iface up + apply
+  the DHCP address.
 - A chip's vendor driver `.so` in the module dir → end-to-end on device
   (scan → WPA2 4-way → DHCP → ping), as the uKernel project already proved
   standalone.
