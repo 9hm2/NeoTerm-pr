@@ -329,6 +329,19 @@ wifi/build-driver.sh ~/rtl8812au rtl8812au -DCONFIG_RTL8812A -DCONFIG_RTL8821A
 modprobe rtl8812au && iw dev wlan0 scan
 ```
 
+**On-device note — module loading can't use the proot redirect.** Android's
+app-sandbox seccomp filter blocks `finit_module`/`init_module`/`delete_module`
+with `SECCOMP_RET_ERRNO(ENOSYS)`, and that action outranks proot's
+`SECCOMP_RET_TRACE`, so the kernel returns ENOSYS *before* the tracer ever sees
+the syscall — no userspace tracer (proot) can intercept module loading. So
+`build-driver.sh` installs tiny guest `modprobe`/`lsmod`/`rmmod`/`insmod` wrappers
+(`/usr/local/sbin`, first on PATH) that `connect()` straight to the daemon's
+abstract socket `@io.neoterm.wifi` (same netns, allowed syscalls) and run the
+UK_OP_MODPROBE/RMMOD/LSMOD protocol directly. The nl80211/AF_PACKET data plane
+still goes through the proot redirect — those syscalls are *not* seccomp-blocked.
+The `finit_module` hook in the redirect is dead on Android (kept for non-Android/
+host parity); the `.ko` stays as a depmod/modinfo-compat carrier.
+
 ## Next (not done)
 
 - **On-device end-to-end**: build a chip's vendor driver with the script above,

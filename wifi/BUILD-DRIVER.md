@@ -14,18 +14,28 @@ drivert **a telefonon, a guesten belül** fordítjuk (nem PC-n, nem NDK-val).
 ## Hogyan áll össze (1 perces modell)
 
 ```
-  guest:  insmod rtl8812au.ko        iw / wpa_supplicant / dhclient
-            │ finit_module(fd)            │ AF_NETLINK (nl80211) / AF_PACKET
-            ▼  (proot UK_WIFI redirect)   ▼  (proot UK_WIFI redirect)
+  guest:  modprobe rtl8812au         iw / wpa_supplicant / dhclient
+            │ connect()                   │ AF_NETLINK (nl80211) / AF_PACKET
+            │ @io.neoterm.wifi            ▼  (proot UK_WIFI redirect)
+            ▼  (guest wrapper, direct)    │
   app:    libukwifid.so  ── dlopen $UK_WIFI_MODDIR/rtl8812au.so ──┐
             kernel-API shim + cfg80211 + usbfs HCD                │
             └── io.neoterm.usb (SCM_RIGHTS fd) ── valódi USB dongle┘
 ```
+(A modul-betöltés a wrappertől megy közvetlenül a daemonhoz; az nl80211/AF_PACKET
+adatsík továbbra is a proot redirecten át — azokat a syscallokat az Android nem
+tiltja, így a proot elkapja.)
 
-- Az `insmod` `finit_module`-ját a proot redirect elkapja, kiolvassa az fd
-  path-jából a modul **nevét**, és a daemonnal `dlopen`-elteti a
-  `$UK_WIFI_MODDIR/<név>.so`-t. **A `.ko` bájtjait sosem használjuk** — csak
-  névhordozó. A valódi kód az alább buildelt `.so`.
+- A `build-driver.sh` egy pici guest-oldali **`modprobe`/`lsmod`/`rmmod`/`insmod`
+  wrappert** telepít (`/usr/local/sbin`, elöl a PATH-ban), ami **közvetlenül** a
+  `@io.neoterm.wifi` daemonnal beszél (`UK_OP_MODPROBE` → `dlopen
+  $UK_WIFI_MODDIR/<név>.so`). **Miért nem a sima modprobe?** Androidon az
+  app-sandbox seccomp-szűrője a `finit_module`/`init_module`/`delete_module`
+  syscallt `ENOSYS`-szal **tiltja**, és ez a tiltás **felülírja** a proot
+  trace-kérését (ERRNO ≻ TRACE) — így a modul-syscallt **semmilyen** userspace
+  tracer nem tudja elfogni. A guest viszont közös network namespace-ben van a
+  daemonnal, így a wrapper egyszerűen `connect()`-el a socketre (engedélyezett
+  syscall). A `.ko` ettől még egy minimális, érvényes ELF (depmod/modinfo kompat).
 - A driver `.so` a **bionic** daemonban fut, ezért **libc-független** kell
   legyen → `-nostdlib`-bal linkeljük (a részletes „miért” a `build-driver.sh`
   fejlécében).
@@ -166,8 +176,9 @@ a `$EXCLUDE`-ot. Mindent fordítani (nem-Realtek driver): `EXCLUDE='' …`.
 ## 6. Betöltés + teszt (a guestből)
 
 ```sh
-modprobe rtl8812au            # vagy: insmod /lib/modules/$(uname -r)/.../rtl8812au.ko
-lsmod | grep rtl8812au        # a daemon /proc/modules-ából
+hash -r                       # a shell vegye fel a /usr/local/sbin/modprobe wrappert
+modprobe rtl8812au            # a wrapper -> @io.neoterm.wifi daemon (insmod is ezt használja)
+lsmod | grep rtl8812au        # a daemontól
 ip link                       # wlan0 megjelenik
 iw dev                        # phy#0 / wlan0, csatornák
 
