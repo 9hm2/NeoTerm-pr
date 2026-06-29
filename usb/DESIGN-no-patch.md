@@ -208,6 +208,46 @@ init; completing enumeration+I/O is a real research effort. If pursued, route 2
 (force usbfs, bypass libudev) is the cleaner bet. Branch keeps all of this; master
 is untouched.
 
+## Device round 4: route 2 is a dead end for udev-built libusb; libudev wall confirmed
+
+Two findings close this off for the stock distro libusb:
+
+1. **No usbfs fallback in the udev build.** The usbfs enumeration path
+   (`usbfs_get_device_list`) only exists when libusb is built `--disable-udev`
+   (which is exactly what `build-neoterm-libusb.sh` does). The distro libusb is a
+   **udev build** — enumeration goes through libudev unconditionally; there is no
+   usbfs path to force. (Confirmed on host: libusb reports "sysfs is available"
+   even with no `/sys/bus/usb` at all.) So **route 2 is not applicable** to the
+   unmodified distro library.
+
+2. **Exactly why a faked `/sys` fails libudev.** Side-by-side strace, faked `/sys`
+   (mount-namespace, no proot) vs the working umockdev run:
+   - umockdev: libudev reads `/sys/devices/1-1/{uevent,subsystem,descriptors}` and
+     enumerates the device (even though `/run/udev/data/+usb:1-1` is ENOENT — the
+     "initialized" DB entry is NOT required).
+   - real faked `/sys`: libudev finds `1-1`, readlinks it, does a manual
+     `..`-walk + `/proc/self/fd` canonicalisation to `/sys/devices/1-1`, then
+     **discards it before ever reading `uevent`**, and moves to `/sys/class`.
+   umockdev only gets past that canonicalisation because its **LD_PRELOAD**
+   intercepts the path/readlink ops *in-process*; proot's syscall-level redirect
+   can't reproduce that in-process resolution. So a proot-bound fake `/sys` can't
+   satisfy libudev's enumeration.
+
+### Verdict
+The no-patch-via-proot approach **cannot complete enumeration** for the stock
+udev-built distro libusb: init is fixable in proot (done), but enumeration is
+gated by libudev path-canonicalisation that only an in-process preload can pass.
+
+Options that remain (all leave master/patch as-is):
+- **Keep `build-neoterm-libusb.sh`** (the patched, fully-working libusb) as the
+  supported path. ← recommended.
+- A **guest LD_PRELOAD shim** (umockdev-style, minimal) that feeds libudev
+  enumeration from `io.neoterm.usb`. Works with any libusb (no libusb patch) but
+  adds a preload to the guest env — a different trade-off, not a proot shim.
+
+The UK_USB netlink init-fix on this branch is still worth keeping if a future
+preload/no-patch path is pursued (it removes the -99 independently).
+
 ## Assessment (superseded by the breakthrough above — kept for history)
 
 The no-patch path is a real **research effort**, materially harder than the camera:
