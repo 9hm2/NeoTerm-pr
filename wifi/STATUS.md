@@ -158,12 +158,29 @@ Host-validated under the rebuilt proot: a guest calling `finit_module(rtl8812au.
 name=rtl8812au` then `OP=31 name=rtl8812au`, and both syscalls returned 0. So the
 guest's `modprobe`/`rmmod` reach the daemon by name; `lsmod` reads the bound file.
 
+## W3b-1 — daemon netlink engine (FULL nl80211, reused) ✅ (host-validated)
+
+The proven uKernel **nl80211 command set is reused as-is** (not rewritten):
+`bridge/{netlink_msg,nl_dispatch,genl_ctrl,nl80211_cmds}.c` are vendored under
+`ukwifi/nl/`, and the `userver_client` they call is swapped for an **in-process
+adapter** (`userver_client_inproc.c`) that invokes the daemon's own
+`ukernel_*` functions directly (no socket round-trip). The LD_PRELOAD-only
+globals (`uknl_send`/`uknl_mcast_send`/`uknl_scan_gen`/sysfs hooks) get sync-model
+glue in `nlglue.c` (early-flush is a no-op since a handler builds its whole reply;
+async mcast events are W3b-2). The daemon registers genl CTRL + nl80211 and serves
+**`UK_OP_NL`** (raw netlink request in → raw reply out via `ukw_nl_dispatch`).
+
+Host-validated (gcc, the engine is portable C): `CTRL_CMD_GETFAMILY("nl80211")`
+returns family id `0x24`; `NL80211_CMD_GET_INTERFACE` returns `wlan0`. Daemon
+links clean (NDK aarch64/bionic; `ukw_nl_dispatch`/`nl80211_register` exported).
+
 ## Next (not done)
 
-- **W3b** — the rest of `uknl_wifi_redirect.c`: the **netlink/packet** control‑plane
-  — `AF_NETLINK` (GENERIC nl80211 + ROUTE rtnetlink) / `AF_PACKET` / wext `ioctl`s
-  → `@io.neoterm.wifi`. Needs the nl80211/rtnetlink/packet message logic
-  (currently in the uKernel `bridge/`) moved daemon‑side. This is what makes
-  `iw` / `wpa_supplicant` / `ip link` work; the biggest remaining component.
+- **W3b-2** — the proot transport + events: `uknl_wifi_redirect.c` intercepts
+  `socket(AF_NETLINK GENERIC/ROUTE)` (mark the fd) and ferries `sendmsg`/`recvmsg`
+  to `@io.neoterm.wifi` `UK_OP_NL`; plus async **multicast events**
+  (NEW_SCAN_RESULTS / MLME) delivered on the guest's event socket (poll/recvmsg),
+  which `iw scan` / `wpa_supplicant` need. Then `AF_PACKET` (monitor/EAPOL) and
+  rtnetlink (`ip link`) — the more preload-entangled `bridge/{rtnetlink,packet_sock}.c`.
 - A chip's vendor driver `.so` (built against the shim, like the proven
   `rtl8812au`) dropped into the module dir — then end‑to‑end on device.

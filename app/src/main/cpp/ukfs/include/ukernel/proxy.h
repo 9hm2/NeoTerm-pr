@@ -40,6 +40,7 @@ enum uk_proxy_op {
 	UK_OP_MODPROBE   = 30, /* payload = modulnév (pl. "rtl8812au"); ret = 0/hiba */
 	UK_OP_RMMOD      = 31, /* payload = modulnév; ret = 0/hiba */
 	UK_OP_LSMOD      = 32, /* válasz payload = /proc/modules szöveg; ret = hossz */
+	UK_OP_NL         = 33, /* payload = nyers netlink kérés; válasz payload = netlink válasz (genl/nl80211) */
 };
 
 /* kulcs-telepítés a 4-way handshake után */

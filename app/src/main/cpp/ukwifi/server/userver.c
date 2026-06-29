@@ -14,6 +14,7 @@
 #include "ukernel/proxy.h"
 #include "modmgr.h"
 #include "wsysfs.h"
+#include "../nl/ukwifi_nl.h"
 #include <linux/ioctl.h>      /* _IOC_SIZE — a mi fejlécünk */
 #include <stdio.h>
 #include <stdlib.h>
@@ -116,6 +117,13 @@ static void *conn_thread(void *arg)
 		if (req.op == UK_OP_LSMOD) {
 			char list[4096]; int n = ukw_lsmod(list, sizeof list);
 			send_rsp(fd, n, list, (uint32_t)(n > 0 ? n : 0));
+			continue;
+		}
+		/* === netlink (nl80211/genl) — raw request in, raw reply out === */
+		if (req.op == UK_OP_NL) {
+			static unsigned char nlout[16384];
+			int n = ukw_nl_dispatch((const unsigned char *) payload, len, nlout, sizeof nlout);
+			send_rsp(fd, n, nlout, (uint32_t)(n > 0 ? n : 0));
 			continue;
 		}
 
@@ -454,6 +462,7 @@ int main(int argc, char **argv)
 	char argv0[1024]; snprintf(argv0, sizeof argv0, "%s", argv[0]);
 	struct ukw_mod_ops mops = { A.run_inits, A.run_exits, A.enumerate_and_probe };
 	ukw_modmgr_init(dirname(argv0), &mops, (uint16_t)vid, (uint16_t)pid);
+	ukw_nl_register();   /* genl CTRL + nl80211 families for UK_OP_NL */
 
 	A.set_loglevel(loglevel);
 	const struct ukernel_hcd_ops *ops = strcmp(hcd, "mock") == 0 ? A.hcd_mock() : A.hcd_usbfs();

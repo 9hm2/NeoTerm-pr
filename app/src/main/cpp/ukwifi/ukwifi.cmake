@@ -59,7 +59,16 @@ add_library(ukwifi_user OBJECT
   ${UKW_DIR}/hcd/usbfs_hcd.c        # URB <-> USBDEVFS over the io.neoterm.usb fd
   ${UKW_DIR}/hcd/mock_hcd.c         # device-less HCD backend (testing)
   ${UKW_DIR}/server/modmgr.c        # modprobe/rmmod/lsmod -> dlopen vendor driver .so
-  ${UKW_DIR}/server/wsysfs.c)       # /sys/class/net + /sys/class/ieee80211 writer
+  ${UKW_DIR}/server/wsysfs.c        # /sys/class/net + /sys/class/ieee80211 writer
+  # netlink engine (genl + full nl80211 cmds, reused from the uKernel bridge) +
+  # the in-process userver_client adapter — driven by UK_OP_NL.
+  ${UKW_DIR}/nl/netlink_msg.c
+  ${UKW_DIR}/nl/nl_dispatch.c
+  ${UKW_DIR}/nl/genl_ctrl.c
+  ${UKW_DIR}/nl/nl80211_cmds.c
+  ${UKW_DIR}/nl/userver_client_inproc.c
+  ${UKW_DIR}/nl/nlglue.c)
+target_include_directories(ukwifi_user PRIVATE ${UKW_DIR}/nl)
 target_compile_options(ukwifi_user PRIVATE ${UKW_CFLAGS} -idirafter ${UKW_INC})
 
 # ============================================================================
