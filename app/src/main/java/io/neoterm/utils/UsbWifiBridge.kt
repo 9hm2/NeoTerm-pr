@@ -65,16 +65,19 @@ object UsbWifiBridge {
     proc = try {
       ProcessBuilder(bin, "--serve", "--sock", SOCKET, "--hcd", "usbfs")
         .apply {
-          environment()["UK_WIFI_MODDIR"] = File(bin).parent
           // where the daemon writes the fake /sys/class/net + /sys/class/ieee80211
           environment()["UK_WIFI_SYSFS_NET"] = UsbWifiSysfsBridge.netDirPath()
           environment()["UK_WIFI_SYSFS_PHY"] = UsbWifiSysfsBridge.phyDirPath()
           environment()["UK_WIFI_PROCMOD"] = UsbWifiSysfsBridge.procModPath()
-          // request_firmware() reads from the guest distro's /lib/firmware (where
-          // the firmware-realtek etc. packages install the .bin files) — the daemon
-          // runs app-side so it needs the absolute rootfs path.
+          // The chip's vendor driver .so and request_firmware() .bin live in the
+          // GUEST distro rootfs (so they can be dropped in from the guest with cp):
+          //   driver  -> /lib/ukwifi/<name>.so   (UK_WIFI_MODDIR)
+          //   firmware-> /lib/firmware/...        (UK_WIFI_FW_DIR; firmware-realtek)
+          // The daemon runs app-side, so it needs the absolute rootfs paths.
           runCatching {
             val rootfs = io.neoterm.setup.proot.ProotManager.selectedDistro().rootfsPath()
+            File("$rootfs/lib/ukwifi").mkdirs()
+            environment()["UK_WIFI_MODDIR"] = "$rootfs/lib/ukwifi"
             environment()["UK_WIFI_FW_DIR"] = "$rootfs/lib/firmware"
           }
         }

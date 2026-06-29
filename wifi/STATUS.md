@@ -313,12 +313,26 @@ Notes for the on-device driver:
   the uKernel project already proved); the in-kernel `rtl8xxxu` does not cover
   these chips — pick the driver source per chip and build it to a `.so`.
 
+## Building a driver on-device (in the guest)
+
+`wifi/build-driver.sh` + `wifi/BUILD-DRIVER.md` compile a chip's **vendor driver
+source into a uKernel-loadable `.so` inside the proot guest** — no PC, no NDK.
+The key trick: the `.so` is `dlopen`'d by the **bionic** daemon, so a normal
+glibc `gcc -shared` won't load; we build the (libc-free) kernel driver code
+`-nostdlib --unresolved-symbols=ignore-all` against the shim headers
+(`app/src/main/cpp/ukfs/include`) → a libc-agnostic aarch64 `.so`. The script
+installs it to `$UK_WIFI_MODDIR` (`/lib/ukwifi`) and drops the `.ko` name carrier
+under `/lib/modules/$(uname -r)/…`, so the guest's `insmod`/`modprobe` just works.
+
+```sh
+wifi/build-driver.sh ~/rtl8812au rtl8812au -DCONFIG_RTL8812A -DCONFIG_RTL8821A
+modprobe rtl8812au && iw dev wlan0 scan
+```
+
 ## Next (not done)
 
-- **On-device end-to-end**: drop a chip's vendor driver `.so` (e.g. the proven
-  `rtl8812au`, built against the shim) into the module dir and run
-  `modprobe rtl8812au` → `wpa_supplicant` → DHCP → `ping` on the real chip, as the
+- **On-device end-to-end**: build a chip's vendor driver with the script above,
+  `modprobe` it → `wpa_supplicant` → DHCP → `ping` on the real chip, as the
   uKernel project already demonstrated standalone. Expect iteration on timing/edge
-  cases (the parts only a real chip + AP exercise).
-- A chip's vendor driver `.so` (built against the shim, like the proven
-  `rtl8812au`) dropped into the module dir — then end‑to‑end on device.
+  cases (the parts only a real chip + AP exercise) and on shim-symbol gaps
+  surfaced by the specific driver at `dlopen`.
