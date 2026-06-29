@@ -108,8 +108,12 @@ object UsbSysfsBridge {
     val usb = runCatching { context.getSystemService(Context.USB_SERVICE) as UsbManager }.getOrNull() ?: return
     val linksDir = File(usbDir, "devices").apply { mkdirs() }
     var n = 0
+    // bus number -> highest device number seen (used as the root hub's port count
+    // so lsusb -t can place each device under its bus's root hub).
+    val buses = HashMap<Int, Int>()
     for (device in usb.deviceList.values) {
       val (bus, dev) = busDev(device.deviceName) ?: continue
+      buses[bus] = maxOf(buses[bus] ?: 1, dev)
       val name = "$bus-$dev"                              // synthetic sysfs name (unique)
       val ddir = File(devDir, name).apply { mkdirs() }   // canonical dir under /sys/devices/neoterm-usb
       val desc = UsbBridge.rawDescriptors(device.deviceName) ?: synthesize(device)
@@ -154,7 +158,51 @@ object UsbSysfsBridge {
       runCatching { File(devfsDir, "%03d/%03d".format(bus, dev)).apply { parentFile?.mkdirs() }.createNewFile() }
       n++
     }
-    Kmsg.log("usb-sysfs: /sys/bus/usb populated with $n device(s)")
+    // One synthetic root hub per bus (Linux Foundation 2.0 root hub, 1d6b:0002),
+    // device number 1 — so `lsusb -t` builds a topology tree. libusb resolves a
+    // device's parent by name ("2-2" -> "usb2"), so a flat sibling dir suffices.
+    for ((bus, maxPort) in buses) rootHub(bus, maxPort, linksDir)
+    Kmsg.log("usb-sysfs: /sys/bus/usb populated with $n device(s), ${buses.size} bus(es)")
+  }
+
+  /** Write a synthetic USB 2.0 root hub at /sys/.../usb<bus> (devnum 1). */
+  private fun rootHub(bus: Int, ports: Int, linksDir: File) {
+    val name = "usb$bus"
+    val ddir = File(devDir, name).apply { mkdirs() }
+    val desc = rootHubDescriptor()
+    w(ddir, "uevent",
+      "DEVTYPE=usb_device\nBUSNUM=%03d\nDEVNUM=001\nDEVNAME=/dev/bus/usb/%03d/001\n".format(bus, bus) +
+        "PRODUCT=1d6b/2/200\nTYPE=9/0/1\n")
+    w(ddir, "busnum", "$bus\n"); w(ddir, "devnum", "1\n"); w(ddir, "speed", "480\n")
+    w(ddir, "bConfigurationValue", "1\n"); w(ddir, "bNumConfigurations", "1\n")
+    w(ddir, "idVendor", "1d6b\n"); w(ddir, "idProduct", "0002\n")
+    w(ddir, "bDeviceClass", "09\n"); w(ddir, "bDeviceSubClass", "00\n"); w(ddir, "bDeviceProtocol", "01\n")
+    w(ddir, "bMaxPacketSize0", "64\n"); w(ddir, "bcdDevice", "0200\n"); w(ddir, "version", " 2.00\n")
+    w(ddir, "bNumInterfaces", " 1\n"); w(ddir, "bmAttributes", "e0\n")
+    w(ddir, "maxchild", "$ports\n"); w(ddir, "rx_lanes", "1\n"); w(ddir, "tx_lanes", "1\n")
+    w(ddir, "configuration", "\n")
+    wb(ddir, "descriptors", desc)
+    symlink(File(ddir, "subsystem"), "../../../bus/usb")
+    symlink(File(linksDir, name), "../../../devices/neoterm-usb/$name")
+    runCatching { File(devfsDir, "%03d/001".format(bus)).apply { parentFile?.mkdirs() }.createNewFile() }
+  }
+
+  /** Minimal USB 2.0 hub descriptor blob: device + config + interface + 1 endpoint. */
+  private fun rootHubDescriptor(): ByteArray {
+    val out = ByteArrayOutputStream()
+    fun le16(v: Int) { out.write(v and 0xff); out.write((v shr 8) and 0xff) }
+    // device descriptor (18)
+    out.write(18); out.write(1); le16(0x0200)
+    out.write(9); out.write(0); out.write(1)            // class hub / sub 0 / proto 1 (single TT)
+    out.write(64); le16(0x1d6b); le16(0x0002); le16(0x0200)
+    out.write(0); out.write(0); out.write(0); out.write(1)   // no string descriptors; 1 config
+    // config descriptor (9) + interface (9) + endpoint (7) = wTotalLength 25
+    out.write(9); out.write(2); le16(25); out.write(1); out.write(1); out.write(0)
+    out.write(0xe0); out.write(0)
+    out.write(9); out.write(4); out.write(0); out.write(0); out.write(1)   // 1 endpoint
+    out.write(9); out.write(0); out.write(0); out.write(0)                 // class hub
+    out.write(7); out.write(5); out.write(0x81); out.write(3); le16(4); out.write(12)  // INT IN ep1
+    return out.toByteArray()
   }
 
   /** Build a USB descriptor blob (device + configs) from UsbDevice metadata when we

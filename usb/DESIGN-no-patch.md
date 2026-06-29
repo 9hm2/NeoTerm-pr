@@ -468,5 +468,7 @@ tracer with pidfd_getfd so poll() honours the real timeout. Userspace libusb I/O
 (control/bulk/interrupt, sync + async) is complete; a kernel netdev driver still
 cannot be loaded under proot, as expected.
 
-Remaining (cosmetic): `lsusb -t` prints nothing because no synthetic root-hub
-device exists in the faked sysfs (the tree has only the attached device).
+`lsusb -t` topology: a synthetic USB 2.0 root hub (1d6b:0002, devnum 1) is now
+added per bus in the faked sysfs, so libusb's name-based parent resolution
+("2-2" -> "usb2") nests each device under its bus and `lsusb -t` prints the tree
+(the root hub also shows in plain `lsusb`, as on real Linux).
