@@ -370,6 +370,17 @@ object NeoPreference {
     )
   }
 
+  /** When on, a connected USB Wi-Fi adapter is brought up app-side by the uKernel
+   *  Wi-Fi framework (libukwifid.so over io.neoterm.wifi): the guest loads the
+   *  vendor driver with `modprobe`, and `iw`/`wpa_supplicant` drive it. Chip
+   *  drivers ship separately. Runtime toggle. */
+  fun isUsbWifiEnabled(): Boolean {
+    return loadBoolean(
+      R.string.key_general_usb_wifi,
+      DefaultValues.enableUsbWifi
+    )
+  }
+
   /** The user's default cursor shape: 0 = block, 1 = underline, 2 = bar (TerminalEmulator
    *  CURSOR_STYLE_*). Apps can still override it at runtime via DECSCUSR. */
   fun getCursorStyle(): Int {

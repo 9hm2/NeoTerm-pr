@@ -25,6 +25,7 @@
 #include <execinfo.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <stddef.h>
 
 struct shim_api {
 	void   (*set_loglevel)(int);
@@ -328,9 +329,21 @@ static int proxy_serve(const char *sockpath)
 	if (srv < 0) { perror("socket"); return -1; }
 	struct sockaddr_un addr = { 0 };
 	addr.sun_family = AF_UNIX;
-	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sockpath);
-	unlink(sockpath);
-	if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) { perror("bind"); return -1; }
+	socklen_t addrlen;
+	if (sockpath[0] == '@') {
+		/* abstract namespace (NeoTerm convention, e.g. @io.neoterm.wifi): leading
+		 * NUL, name in the rest; length must stop at the name (no trailing NULs). */
+		size_t nl = strlen(sockpath + 1);
+		if (nl > sizeof(addr.sun_path) - 1) nl = sizeof(addr.sun_path) - 1;
+		addr.sun_path[0] = '\0';
+		memcpy(addr.sun_path + 1, sockpath + 1, nl);
+		addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + nl);
+	} else {
+		snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sockpath);
+		unlink(sockpath);
+		addrlen = sizeof(addr);
+	}
+	if (bind(srv, (struct sockaddr *)&addr, addrlen) < 0) { perror("bind"); return -1; }
 	if (listen(srv, 8) < 0) { perror("listen"); return -1; }
 
 	printf("uServer: proxy figyel: %s\n", sockpath);
@@ -396,7 +409,10 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
 		else if (nmodules < 16) modules[nmodules++] = argv[i];
 	}
-	if (nmodules == 0) { usage(argv[0]); return 1; }
+	/* Chip-agnostic serve mode: a daemon may start with NO driver module — the
+	 * guest's `modprobe` loads the vendor .so later (UK_OP_MODPROBE). Only the
+	 * one-shot CLI modes (no --serve) require a module up front. */
+	if (nmodules == 0 && !serve) { usage(argv[0]); return 1; }
 
 	/* Two deployment models:
 	 *  - separate .so (dev/host): --shim libkernel_shim.so → dlopen it.
@@ -470,13 +486,20 @@ int main(int argc, char **argv)
 		if (drv_log) { *drv_log = 5; printf("uServer: rtw_drv_log_level = 5\n"); }
 	}
 
-	printf("uServer: module_init futtatása\n");
-	if (A.run_inits()) { fprintf(stderr, "uServer: module_init hiba\n"); return 4; }
+	/* Driver(s) given on argv (dev/one-shot): bring them up now. In chip-agnostic
+	 * serve mode (no argv module) this is skipped — the guest's `modprobe` runs
+	 * module_init + probe per driver it loads (UK_OP_MODPROBE -> modmgr). */
+	if (nmodules > 0) {
+		printf("uServer: module_init futtatása\n");
+		if (A.run_inits()) { fprintf(stderr, "uServer: module_init hiba\n"); return 4; }
 
-	printf("uServer: USB enumeráció + probe (%04x:%04x)\n", vid, pid);
-	int bound = A.enumerate_and_probe(vid, pid);
-	printf("uServer: bekötött eszközök: %d\n", bound);
-	if (bound <= 0) { fprintf(stderr, "uServer: nincs bekötött eszköz\n"); A.run_exits(); return 5; }
+		printf("uServer: USB enumeráció + probe (%04x:%04x)\n", vid, pid);
+		int bound = A.enumerate_and_probe(vid, pid);
+		printf("uServer: bekötött eszközök: %d\n", bound);
+		if (bound <= 0) { fprintf(stderr, "uServer: nincs bekötött eszköz\n"); A.run_exits(); return 5; }
+	} else {
+		printf("uServer: nincs argv-modul — serve mód (a guest modprobe-ja tölt drivert)\n");
+	}
 
 	if (A.wiphy_count && A.wiphy_count() > 0) {
 		printf("uServer: cfg80211 wiphy-k:");

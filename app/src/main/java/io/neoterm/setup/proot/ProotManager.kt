@@ -271,6 +271,11 @@ object ProotManager {
     // FS engine that mounts /dev/uksd0 (sectors over io.neoterm.block) and serves
     // the proot VFS-redirect (UK_FS). Without it, mount(/dev/uksd0) does nothing.
     io.neoterm.setup.usbserial.FsBridge.ensureReady()
+    // USB Wi-Fi: launch the ukwifid daemon (@io.neoterm.wifi) — the uKernel Wi-Fi
+    // framework. Chip-agnostic, no driver; the guest brings a chip up with
+    // `modprobe` (routed by the UK_WIFI redirect to the daemon, which dlopens the
+    // vendor .so and drives the chip over io.neoterm.usb). Only with the toggle.
+    io.neoterm.utils.UsbWifiBridge.ensureReady()
     // Bind a writable fake /sys/class/tty so the guest can readdir it (Android
     // SELinux blocks the real one) — ls / pyserial enumerate the ports there.
     io.neoterm.setup.usbserial.UsbSerialBridge.sysfsBind()?.let { bind(args, it, "/sys/class/tty") }
@@ -520,6 +525,10 @@ object ProotManager {
     if (NeoPreference.isUsbStorageEnabled()) { env.add("UK_BLOCK=1"); env.add("UK_FS=1") }
     // Camera: trap the V4L2 syscalls (ioctl/read/poll/…) for the /dev/video0 shim.
     if (NeoPreference.isCameraEnabled()) { env.add("UK_CAM=1") }
+    // USB Wi-Fi: gate the proot control-plane redirect (AF_NETLINK/AF_PACKET/wext
+    // + init_module/finit_module/delete_module + /proc/modules -> io.neoterm.wifi).
+    // The redirect itself (uknl_wifi_redirect.c) is W3; this wires the gate now.
+    if (NeoPreference.isUsbWifiEnabled()) { env.add("UK_WIFI=1") }
     // USB (libusb): trap bind() so the netlink udev-hotplug monitor can't fail
     // libusb_init() (Android/SELinux blocks the netlink group bind). The USB host
     // bridge is always active, so this is always on. Scoped to netlink monitors.

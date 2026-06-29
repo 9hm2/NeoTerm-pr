@@ -15,6 +15,7 @@
   <string name="key_general_usb_serial" translatable="false">neoterm_general_usb_serial</string>
   <string name="key_general_sensors" translatable="false">neoterm_general_sensors</string>
   <string name="key_general_usb_storage" translatable="false">neoterm_general_usb_storage</string>
+  <string name="key_general_usb_wifi" translatable="false">neoterm_general_usb_wifi</string>
   <string name="key_general_cursor_style" translatable="false">neoterm_general_cursor_style</string>
   <string name="key_general_use_execve_wrapper" translatable="false">neoterm_general_use_execve_wrapper</string>
   <string name="key_general_enable_word_based_ime" translatable="false">neoterm_general_enable_word_based_ime</string>

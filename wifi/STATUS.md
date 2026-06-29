@@ -101,10 +101,33 @@ hood). Added the daemon backend:
 `UK_WIFI` redirect of `init_module`/`finit_module`/`delete_module` → these ops,
 and `/proc/modules` read → `UK_OP_LSMOD`) is part of W3.
 
+## W1 — Android bridge + Settings toggle + UK_WIFI gate ✅
+
+- `UsbWifiBridge.kt` (`io.neoterm.utils`): launches/supervises `libukwifid.so` in
+  **serve mode with no driver** on the abstract socket `@io.neoterm.wifi`
+  (`--serve --sock @io.neoterm.wifi --hcd usbfs`, `UK_WIFI_MODDIR` = app lib dir);
+  `killStale()` like `FsBridge`; gated by the toggle. Torn down in
+  `NeoTermService` alongside the other bridges.
+- Settings: **"USB Wi-Fi (modprobe)"** CheckBox (`key_general_usb_wifi` +
+  strings + `setting_general.xml`), `DefaultValues.enableUsbWifi=false`,
+  `NeoPreference.isUsbWifiEnabled()`.
+- `ProotManager`: `UsbWifiBridge.ensureReady()` on launch; `UK_WIFI=1` env added
+  when the toggle is on (gates the future W3 redirect).
+- Daemon: `userver` now starts **chip-agnostic** (no argv module required in
+  `--serve`; skips the one-shot probe), and `proxy_serve` binds **abstract**
+  sockets (`@name`). Rebuilds/links clean (NDK aarch64/bionic).
+
+So toggling **USB Wi-Fi** on starts the framework daemon; the guest-facing
+behaviour arrives with W3.
+
 ## Next (not done)
 
-- **W1+** — per `DESIGN.md`: `UsbWifiBridge.kt` launch + chip claim; bring a
-  chip up (`probe`/`ndo_open`) once a driver `.so` is provided; the
-  `/sys/class/net` + `/sys/class/ieee80211` bridge; the `uknl_wifi_redirect.c`
-  control‑plane (AF_NETLINK/AF_PACKET/wext → `io.neoterm.wifi`); Settings
-  toggle + `UK_WIFI` gate.
+- **W2** — `/sys/class/net/wlan0` + `/sys/class/ieee80211/phy0` fake sysfs bridge
+  (like `UsbSysfsBridge`), surfaced from the daemon's netdev/wiphy.
+- **W3** — `uknl_wifi_redirect.c` (proot, `UK_WIFI`): the control‑plane —
+  AF_NETLINK (GENERIC+ROUTE) / AF_PACKET / wext `ioctl`s /
+  `init_module`·`finit_module`·`delete_module` / `/proc/modules` →
+  `@io.neoterm.wifi` (`UK_OP_*`). The biggest single new component; makes
+  `modprobe`/`lsmod`/`iw`/`wpa_supplicant` work from the guest.
+- A chip's vendor driver `.so` (built against the shim, like the proven
+  `rtl8812au`) dropped into the module dir — then end‑to‑end on device.

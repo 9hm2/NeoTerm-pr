@@ -156,6 +156,8 @@
   <string name="pref_general_sensors_desc">Expose the device battery and motion/environment sensors to the distro as a fake /sys/class/power_supply and /sys/bus/iio/devices tree. No root — upower, acpi, iio_info, cat and IIO-aware tools work. Takes effect on the next session.</string>
   <string name="pref_general_usb_storage">USB storage (/dev/uksd0)</string>
   <string name="pref_general_usb_storage_desc">Expose a connected USB pendrive as a raw block device /dev/uksd0 (SCSI Bulk-Only-Transport app-side). No root — dd, fdisk, parted, mkfs.*, fsck.*, mtools and any filesystem work. Takes effect on the next plug-in.</string>
+  <string name="pref_general_usb_wifi">USB Wi-Fi (modprobe)</string>
+  <string name="pref_general_usb_wifi_desc">Bring up a USB Wi-Fi adapter app-side via the uKernel Wi-Fi framework: load the vendor driver in the distro with modprobe, then iw / wpa_supplicant drive the chip. No root. Chip drivers ship separately; without one this only starts the framework. Takes effect on the next session.</string>
   <string-array name="pref_general_camera_resolution_entries" translatable="false">
     <item>320x240</item>
     <item>640x480</item>

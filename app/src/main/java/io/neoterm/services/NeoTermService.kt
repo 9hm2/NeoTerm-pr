@@ -153,6 +153,7 @@ class NeoTermService : Service() {
     io.neoterm.setup.usbserial.UsbSerialBridge.stopAll()
     io.neoterm.setup.usbserial.BlockBridge.stopAll()
     io.neoterm.setup.usbserial.FsBridge.stopAll()
+    io.neoterm.utils.UsbWifiBridge.stopAll()
 
     for (i in mTerminalSessions.indices)
       mTerminalSessions[i].finishIfRunning()

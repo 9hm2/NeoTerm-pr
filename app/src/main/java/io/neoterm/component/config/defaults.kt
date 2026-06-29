@@ -24,6 +24,7 @@ object DefaultValues {
   const val enableUsbSerial = false
   const val enableSensors = false
   const val enableUsbStorage = false
+  const val enableUsbWifi = false
   const val cursorStyle = "block"
   const val enableWordBasedIme = false
 
