@@ -177,10 +177,23 @@ if [ "$FAILED" -gt 0 ]; then
 fi
 
 # --- link: shared, libc-agnostic ------------------------------------------
-# -z noexecstack: avoid a GNU_STACK exec mark that would need SELinux execstack
-# (denied for the app uid) when the daemon dlopens this on Android.
+# The driver needs libc functions (memcmp/snprintf/fopen/pthread_create/...) at
+# load time. It's built under glibc but loaded under bionic, so we can't link a
+# real libc (the glibc DT_NEEDED libc.so.6 wouldn't load on bionic). Instead emit
+# a DT_NEEDED entry for *bionic's* soname "libc.so" (+ libm/libdl) by linking
+# against tiny EMPTY stubs with those sonames: no symbols are pulled at build time,
+# but at dlopen bionic sees NEEDED libc.so and loads the real C library, from which
+# the driver resolves all of libc. (Promoting libc to the global group from the
+# daemon did NOT work on bionic — a dlopen'd object only searches its own
+# DT_NEEDED + the loader's globals, not the executable's libc; a real NEEDED entry
+# is what bionic honors.) --no-as-needed forces the NEEDED entries even though the
+# stubs export nothing. The kernel API still resolves from the daemon image.
+# -z noexecstack: avoid an exec-stack mark needing SELinux execstack on Android.
+STUBLIB="$WORK/stublib"; mkdir -p "$STUBLIB"
+for L in c m dl; do "$CC" -shared -nostdlib -Wl,-soname,"lib$L.so" -o "$STUBLIB/lib$L.so" -x c /dev/null 2>/dev/null; done
 "$CC" -shared -nostdlib -fPIC -o "$WORK/$OUT.so" "${OBJS[@]}" \
-  -Wl,--unresolved-symbols=ignore-all -Wl,-soname,"$OUT.so" -Wl,-z,noexecstack
+  -Wl,--unresolved-symbols=ignore-all -Wl,-soname,"$OUT.so" -Wl,-z,noexecstack \
+  -L"$STUBLIB" -Wl,--no-as-needed -lc -lm -ldl -Wl,--as-needed
 
 mkdir -p "$MODDIR"
 install -m 0644 "$WORK/$OUT.so" "$MODDIR/$OUT.so"
