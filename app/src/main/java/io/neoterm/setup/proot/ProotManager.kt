@@ -506,6 +506,11 @@ object ProotManager {
     // libusb_init() (Android/SELinux blocks the netlink group bind). The USB host
     // bridge is always active, so this is always on. Scoped to netlink monitors.
     env.add("UK_USB=1")
+    // Make stock systemd libudev accept our faked /sys/bus/usb: it normally refuses
+    // any device dir not on a real sysfs filesystem (fd_is_fs_type SYSFS_MAGIC), but
+    // that check is gated by this env var. With it off, unmodified libusb/libudev
+    // enumerate USB devices from the proot-provided fake /sys — no patch, no preload.
+    env.add("SYSTEMD_DEVICE_VERIFY_SYSFS=0")
     return env.toTypedArray()
   }
 }

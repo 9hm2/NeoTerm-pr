@@ -296,6 +296,49 @@ no nested `strace` under proot).
 3. **Accept** that unmodified-libudev enumeration needs in-process interception
    (preload) which is out of scope by the no-preload/no-patch constraint.
 
+## Device round 6: BREAKTHROUGH — `SYSTEMD_DEVICE_VERIFY_SYSFS=0`
+
+Read systemd 255.4 `sd-device.c` `device_set_syspath(verify=true)`. The exact check
+that discarded our faked device is:
+
+    r = getenv_bool_secure("SYSTEMD_DEVICE_VERIFY_SYSFS");
+    if (r != 0) {                                  // unset → runs
+        if (fd_is_fs_type(fd, SYSFS_MAGIC) == 0)   // is the dir really on sysfs?
+            return -ENODEV;                        // "outside of sysfs, refusing"
+    }
+
+systemd's libudev verifies each device dir is on a real sysfs filesystem — and a
+proot/bind fake `/sys` is ext2/etc., so every device is refused. **But the check is
+gated by an env var.** Setting **`SYSTEMD_DEVICE_VERIFY_SYSFS=0`** makes the
+*unmodified* systemd libudev skip it.
+
+**Validated (host, real systemd libusb 1.0.30 + libudev 255, NO preload, NO
+patch):** a complete fake `/sys` bound over `/sys` **under proot** plus
+`SYSTEMD_DEVICE_VERIFY_SYSFS=0` →
+
+    libusb_init = 0 (ok)
+    get_device_list = 1 devices
+      bus=1 addr=2  1234:5678
+
+So the no-preload / no-guest-patch goal IS achievable: proot provides a fake
+`/sys/bus/usb` (from `io.neoterm.usb`) + the env var, and the stock distro libusb
+enumerates. This is the user's vision realised.
+
+(The host's *partial* subtree binds didn't enumerate, but the host container's
+`/sys` is minimal/inconsistent; on a real device the existing sensor/block bridges
+already use partial `/sys` subtree binds successfully, so the USB subtree bind +
+env var is expected to work on-device. Delivery to validate on device.)
+
+### Remaining work (no patch, no preload)
+1. `ProotManager`: export `SYSTEMD_DEVICE_VERIFY_SYSFS=0` (done) + `UK_USB` for the
+   netlink init-fix.
+2. A `UsbSysfsBridge` (Kotlin, like `BlockSysfsBridge`): build a readable fake
+   `/sys/bus/usb` (+ device dirs: uevent, busnum, devnum, speed, descriptors,
+   idVendor/idProduct, subsystem→usb) from `io.neoterm.usb` LIST + raw descriptors;
+   bind it. → stock `lsusb` lists devices, unmodified.
+3. I/O (`lsusb -v`, pyusb): `/dev/bus/usb` nodes + the USBDEVFS proxy or the
+   io.neoterm.usb fd (Phase 2), on device.
+
 ## Assessment (superseded by the breakthrough above — kept for history)
 
 The no-patch path is a real **research effort**, materially harder than the camera:
