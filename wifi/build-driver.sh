@@ -103,16 +103,25 @@ CFLAGS=(
 # A vendor tree ships sources for OTHER buses/platforms/chips that its Kbuild
 # never compiles for a USB STA build (selected by CONFIG_*). Building them all
 # fails on headers we don't have (mach/*.h, linux/mmc/sdio_func.h, linux/jhash.h)
-# or test-only types (PMPT_CONTEXT, NDIS_STATUS, sint/BOOLEAN). The proven uKernel
-# build compiled a curated ~145-file subset, not the full 209. Mirror that by
-# excluding the non-target categories — same effect as the vendor Kbuild gates:
-#   platform/*          -> CONFIG_PLATFORM_*   (we're generic)
-#   *sdio*/*gspi*/*pci*  -> bus != USB
-#   rhashtable.c        -> CONFIG_RTW_MESH
+# or other-platform types (PDM_ODM_T, PWRTRACK_METHOD, struct rtl8192cd_priv,
+# CamelCase Windows members). The proven uKernel build compiled a curated subset.
+# Mirror that by excluding the non-target categories — same effect as the vendor
+# Kbuild gates:
+#   platform/*               -> CONFIG_PLATFORM_*   (we're generic)
+#   *sdio*/*gspi*/*pci*       -> bus != USB
+#   rhashtable.c             -> CONFIG_RTW_MESH
 #   rtw_mp*/rtw_bt_mp/rtw_eeprom/rtw_ioctl_rtl -> CONFIG_MP_INCLUDED / legacy
+#   8814a                    -> CONFIG_RTL8814A not selected (a different chip)
+#   halrf*_ap/_win/_iot      -> phydm RF platform variants for AP(router-SDK) /
+#                               WIN(Windows) / IOT; we build CE (the *_ce.c ones)
+#   hal_halmac / halmac/     -> halmac engine (8822b/8821c-class chips)
+#   halrf_txgapcal           -> 8814a-era TX-gap cal (non-CE PDM_ODM_T)
 # Override with $EXCLUDE (an extended-regex over full paths); set EXCLUDE='' to
-# build everything (e.g. a non-Realtek driver that needs no curation).
-DEFAULT_EXCLUDE='/platform/|sdio|gspi|_pci|pcie|/rhashtable\.c|/rtw_mp\.c|/rtw_mp_ioctl\.c|/rtw_bt_mp\.c|/rtw_eeprom\.c|/rtw_ioctl_rtl\.c'
+# build everything (e.g. a non-Realtek driver that needs no curation). For a
+# DIFFERENT Realtek chip, drop its tag from here and add -DCONFIG_RTL<chip>.
+DEFAULT_EXCLUDE='/platform/|sdio|gspi|_pci|pcie|/rhashtable\.c'
+DEFAULT_EXCLUDE="$DEFAULT_EXCLUDE"'|/rtw_mp\.c|/rtw_mp_ioctl\.c|/rtw_bt_mp\.c|/rtw_eeprom\.c|/rtw_ioctl_rtl\.c'
+DEFAULT_EXCLUDE="$DEFAULT_EXCLUDE"'|8814a|hal_halmac\.c|/halmac/|halrf_txgapcal\.c|hal(rf|phyrf)[a-z0-9_]*_(ap|win|iot)\.c'
 EXCLUDE="${EXCLUDE-$DEFAULT_EXCLUDE}"
 SRCS=()
 nexcl=0
