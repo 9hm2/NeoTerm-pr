@@ -25,6 +25,20 @@ static int uk_wifi_on(void)
 	return g_uk_wifi;
 }
 
+/* Redirect-side trace: append to $UK_WIFI_REDIR_LOG (a guest-readable file under
+ * the app data dir, set by ProotManager). strace can't run under proot's nested
+ * ptrace, so this is how we see the ferry's recvmsg/sendmsg decisions. */
+#include <stdarg.h>
+#include <fcntl.h>
+static void ukw_dlog(const char *fmt, ...)
+{
+	static int fd = -2;
+	if (fd == -2) { const char *p = getenv("UK_WIFI_REDIR_LOG"); fd = (p && *p) ? open(p, O_WRONLY | O_CREAT | O_APPEND, 0600) : -1; }
+	if (fd < 0) return;
+	char b[400]; va_list a; va_start(a, fmt); int n = vsnprintf(b, sizeof b, fmt, a); va_end(a);
+	if (n > 0) { if (n >= (int) sizeof b) n = (int) sizeof b - 1; ssize_t w = write(fd, b, (size_t) n); (void) w; }
+}
+
 /* wire protocol — mirrors app/src/main/cpp/ukfs/include/ukernel/proxy.h */
 struct ukw_req { uint32_t op, cmd, len; };
 struct ukw_rsp { int32_t ret; uint32_t len; };
@@ -338,6 +352,7 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			int rl = ukw_nl_call(w->is_route ? UKW_OP_RTNL : UKW_OP_NL, reqbuf, total, rep, sizeof rep);
 			free(w->reply); w->reply = NULL; w->rlen = 0; w->roff = 0;
 			if (rl > 0) { w->reply = (uint8_t *) malloc(rl); if (w->reply) { memcpy(w->reply, rep, rl); w->rlen = rl; } }
+			ukw_dlog("sendmsg fd=%d %s req=%d -> reply=%d\n", fd, w->is_route ? "rtnl" : "genl", total, rl);
 			UKW_RET(total);   /* report all bytes "sent" */
 		}
 		/* recvmsg: first drain a stashed command reply (W3b-2); else, on a
@@ -390,6 +405,9 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 				copied = off; msglen = el;
 			}
 		}
+		ukw_dlog("recvmsg fd=%d %s peek=%d niov=%lu iov0=%d msglen=%d copied=%d sub=%d roff=%d/%d\n",
+		         fd, w->is_route ? "rtnl" : "genl", peek, niov,
+		         niov ? (int) iov[0].iov_len : -1, msglen, copied, w->sub, w->roff, w->rlen);
 		if (msglen < 0) UKW_RET(-EAGAIN);   /* nothing pending */
 		/* MSG_PEEK|MSG_TRUNC: the caller (iproute2 peeks with iov_len=0) sizes its
 		 * buffer from the return value, which must be the FULL message length even

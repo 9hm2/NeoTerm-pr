@@ -551,7 +551,13 @@ object ProotManager {
     // USB Wi-Fi: gate the proot control-plane redirect (AF_NETLINK/AF_PACKET/wext
     // + init_module/finit_module/delete_module + /proc/modules -> io.neoterm.wifi).
     // The redirect itself (uknl_wifi_redirect.c) is W3; this wires the gate now.
-    if (NeoPreference.isUsbWifiEnabled()) { env.add("UK_WIFI=1") }
+    if (NeoPreference.isUsbWifiEnabled()) {
+      env.add("UK_WIFI=1")
+      // Redirect-side trace target (the proot tracer can't be straced under proot's
+      // nested ptrace); the ferry appends recvmsg/sendmsg decisions here, readable
+      // from the guest via the /data bind. Same dir as the daemon log.
+      env.add("UK_WIFI_REDIR_LOG=${App.get().filesDir.absolutePath}/ukredir.log")
+    }
     // USB (libusb): trap bind() so the netlink udev-hotplug monitor can't fail
     // libusb_init() (Android/SELinux blocks the netlink group bind). The USB host
     // bridge is always active, so this is always on. Scoped to netlink monitors.
