@@ -13,6 +13,7 @@
 #include "ukernel/runtime.h"
 #include "ukernel/proxy.h"
 #include "modmgr.h"
+#include "wsysfs.h"
 #include <linux/ioctl.h>      /* _IOC_SIZE — a mi fejlécünk */
 #include <stdio.h>
 #include <stdlib.h>
@@ -497,6 +498,7 @@ int main(int argc, char **argv)
 		int bound = A.enumerate_and_probe(vid, pid);
 		printf("uServer: bekötött eszközök: %d\n", bound);
 		if (bound <= 0) { fprintf(stderr, "uServer: nincs bekötött eszköz\n"); A.run_exits(); return 5; }
+		ukw_wsysfs_refresh();   /* publish /sys/class/net + /sys/class/ieee80211 */
 	} else {
 		printf("uServer: nincs argv-modul — serve mód (a guest modprobe-ja tölt drivert)\n");
 	}

@@ -120,10 +120,27 @@ and `/proc/modules` read → `UK_OP_LSMOD`) is part of W3.
 So toggling **USB Wi-Fi** on starts the framework daemon; the guest-facing
 behaviour arrives with W3.
 
+## W2 — /sys/class/net + /sys/class/ieee80211 bridge ✅
+
+- `UsbWifiSysfsBridge.kt`: binds `sys-class-net → /sys/class/net` and
+  `sys-class-ieee80211 → /sys/class/ieee80211` (gated by the toggle, since the
+  overlay hides the app‑inaccessible real netdevs), seeded with a static `lo`.
+- The daemon **populates** them: `server/wsysfs.c` (`ukw_wsysfs_refresh`) writes
+  per‑interface (`address`/`ifindex`/`type`/`flags`/`mtu`/`operstate`/`carrier`/
+  `uevent` + `phy80211` symlink) and per‑phy (`name`/`index`/`macaddress`) files
+  from the live netdev/wiphy accessors, into `$UK_WIFI_SYSFS_NET` /
+  `$UK_WIFI_SYSFS_PHY`. Called after a driver probes (in `modmgr` and the argv
+  path). So `wlanN`/`phyN` appear when a chip comes up; the skeleton + `lo` exist
+  from the start, listable from the guest.
+- `UsbWifiBridge` passes the two sysfs paths as env; `ProotManager` binds the
+  trees (toggle‑gated). Daemon rebuilds/links clean (NDK aarch64/bionic;
+  `ukw_wsysfs_refresh` exported).
+
+`ip link` / `if_nametoindex` / `readdir(/sys/class/net)` will see the interface
+once a driver is up; full Wi‑Fi control (`iw`/`wpa_supplicant`) is nl80211 → W3.
+
 ## Next (not done)
 
-- **W2** — `/sys/class/net/wlan0` + `/sys/class/ieee80211/phy0` fake sysfs bridge
-  (like `UsbSysfsBridge`), surfaced from the daemon's netdev/wiphy.
 - **W3** — `uknl_wifi_redirect.c` (proot, `UK_WIFI`): the control‑plane —
   AF_NETLINK (GENERIC+ROUTE) / AF_PACKET / wext `ioctl`s /
   `init_module`·`finit_module`·`delete_module` / `/proc/modules` →

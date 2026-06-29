@@ -64,7 +64,12 @@ object UsbWifiBridge {
     val log = File(App.get().filesDir, "ukwifid.log")
     proc = try {
       ProcessBuilder(bin, "--serve", "--sock", SOCKET, "--hcd", "usbfs")
-        .apply { environment()["UK_WIFI_MODDIR"] = File(bin).parent }
+        .apply {
+          environment()["UK_WIFI_MODDIR"] = File(bin).parent
+          // where the daemon writes the fake /sys/class/net + /sys/class/ieee80211
+          environment()["UK_WIFI_SYSFS_NET"] = UsbWifiSysfsBridge.netDirPath()
+          environment()["UK_WIFI_SYSFS_PHY"] = UsbWifiSysfsBridge.phyDirPath()
+        }
         .redirectErrorStream(true)
         .redirectOutput(ProcessBuilder.Redirect.to(log))
         .start()

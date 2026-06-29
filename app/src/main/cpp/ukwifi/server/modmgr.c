@@ -1,5 +1,6 @@
 /* uKernel Wi-Fi — module manager (see modmgr.h). */
 #include "modmgr.h"
+#include "wsysfs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +83,7 @@ int ukw_modprobe(const char *name)
 		int n = g_ops.probe(g_vid, g_pid);
 		fprintf(stderr, "ukwifi/modmgr: %s probe -> %d eszköz\n", name, n);
 	}
+	ukw_wsysfs_refresh();   /* publish /sys/class/net + /sys/class/ieee80211 */
 	m->used = 1; m->handle = h; m->size = file_size(path);
 	snprintf(m->name, sizeof m->name, "%s", name);
 	return 0;

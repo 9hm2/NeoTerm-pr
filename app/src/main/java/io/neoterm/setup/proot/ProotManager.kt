@@ -303,6 +303,12 @@ object ProotManager {
     // so stock libusb's usbfs path works — lsusb -v, pyusb, libftdi, rtl-sdr, …
     io.neoterm.utils.UsbSysfsBridge.devfsBinds().forEach { (host, guest) -> bind(args, host, guest) }
     runCatching { io.neoterm.utils.UsbBridge.refreshSysfs() }   // fill from current UsbManager state
+    // USB Wi-Fi: overlay /sys/class/net + /sys/class/ieee80211 (the daemon fills
+    // them when a chip's driver comes up). Gated by the toggle — overlaying hides
+    // the (app-inaccessible) real netdevs, so only do it when Wi-Fi is wanted.
+    if (NeoPreference.isUsbWifiEnabled()) {
+      io.neoterm.utils.UsbWifiSysfsBridge.sysfsBinds().forEach { (host, guest) -> bind(args, host, guest) }
+    }
 
     // Camera: expose a REAL /dev/video0 V4L2 node (proot cam shim, UK_CAM). An empty
     // marker becomes the device; the shim (uknl_cam_redirect.c) proxies its V4L2
