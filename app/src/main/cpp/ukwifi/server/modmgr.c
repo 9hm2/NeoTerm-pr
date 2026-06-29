@@ -25,8 +25,12 @@ void ukw_modmgr_init(const char *moddir, const struct ukw_mod_ops *ops,
 {
 	if (ops) g_ops = *ops;
 	g_vid = vid; g_pid = pid;
-	const char *d = moddir;
-	if (!d || !*d) d = getenv("UK_WIFI_MODDIR");
+	/* $UK_WIFI_MODDIR is the source of truth (the guest distro's lib/ukwifi, set by
+	 * UsbWifiBridge); the passed-in dir (argv0's dir = the app lib dir) is only a
+	 * fallback. The previous order used the always-non-empty argv0 dir and never
+	 * consulted the env, so drivers dropped into the distro were never found. */
+	const char *d = getenv("UK_WIFI_MODDIR");
+	if (!d || !*d) d = moddir;
 	snprintf(g_moddir, sizeof g_moddir, "%s", d && *d ? d : ".");
 }
 

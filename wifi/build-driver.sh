@@ -167,8 +167,10 @@ if [ "$FAILED" -gt 0 ]; then
 fi
 
 # --- link: shared, libc-agnostic ------------------------------------------
+# -z noexecstack: avoid a GNU_STACK exec mark that would need SELinux execstack
+# (denied for the app uid) when the daemon dlopens this on Android.
 "$CC" -shared -nostdlib -fPIC -o "$WORK/$OUT.so" "${OBJS[@]}" \
-  -Wl,--unresolved-symbols=ignore-all -Wl,-soname,"$OUT.so"
+  -Wl,--unresolved-symbols=ignore-all -Wl,-soname,"$OUT.so" -Wl,-z,noexecstack
 
 mkdir -p "$MODDIR"
 install -m 0644 "$WORK/$OUT.so" "$MODDIR/$OUT.so"
@@ -277,10 +279,24 @@ int main(int argc,char**argv){
 }
 CEOF
 if "$CC" -O2 -o "$WORK/ukmodtool" "$WORK/ukmodtool.c" 2>"$WORK/wraperr"; then
-  mkdir -p /usr/local/bin /usr/local/sbin
-  install -m 0755 "$WORK/ukmodtool" /usr/local/bin/ukmodtool
-  for w in modprobe insmod rmmod lsmod; do ln -sf ../bin/ukmodtool "/usr/local/sbin/$w"; done
-  echo "build-driver: installed guest wrappers -> /usr/local/sbin/{modprobe,insmod,rmmod,lsmod} (talk to @io.neoterm.wifi)"
+  # Android W^X: a runtime-created file under /data (the rootfs) can't always be
+  # exec'd, but tmpfs (/tmp) is exec-capable for fresh files. So the actual binary
+  # lives on tmpfs; /usr/local/sbin holds symlinks to it (execve resolves through
+  # the symlink to the tmpfs target). A persistent copy under /usr/local/lib +
+  # a profile.d snippet re-stage it to /tmp after a reboot (tmpfs is volatile).
+  mkdir -p /usr/local/lib/ukwifi /usr/local/sbin /tmp/.ukwifi
+  install -m 0755 "$WORK/ukmodtool" /usr/local/lib/ukwifi/ukmodtool   # persistent store
+  cp -f /usr/local/lib/ukwifi/ukmodtool /tmp/.ukwifi/ukmodtool && chmod 0755 /tmp/.ukwifi/ukmodtool
+  for w in modprobe insmod rmmod lsmod; do ln -sf /tmp/.ukwifi/ukmodtool "/usr/local/sbin/$w"; done
+  cat > /etc/profile.d/ukwifi-modtool.sh <<'PEOF'
+# Re-stage the uKernel Wi-Fi module wrappers onto tmpfs (exec-capable) at login;
+# /tmp is wiped on reboot, the persistent copy lives under /usr/local/lib.
+d=/tmp/.ukwifi
+if [ ! -x "$d/ukmodtool" ] && [ -e /usr/local/lib/ukwifi/ukmodtool ]; then
+  mkdir -p "$d" && cp -f /usr/local/lib/ukwifi/ukmodtool "$d/ukmodtool" 2>/dev/null && chmod 0755 "$d/ukmodtool"
+fi
+PEOF
+  echo "build-driver: installed guest wrappers -> /usr/local/sbin/{modprobe,insmod,rmmod,lsmod} -> /tmp/.ukwifi/ukmodtool (talk to @io.neoterm.wifi)"
 else
   sed 's/^/  /' "$WORK/wraperr" >&2
   echo "build-driver: WARN could not build the modprobe wrapper (cc error above); modprobe will NOT reach the daemon" >&2
