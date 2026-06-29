@@ -35,6 +35,7 @@ struct ukw_rsp { int32_t ret; uint32_t len; };
 #define UKW_OP_MODPROBE 30
 #define UKW_OP_RMMOD    31
 #define UKW_OP_NL       33
+#define UKW_OP_RTNL     36
 
 /* Connect to the daemon's abstract socket @io.neoterm.wifi. */
 static int ukw_connect(void)
@@ -68,10 +69,10 @@ static int ukw_call(uint32_t op, const char *name)
 
 /* Send a raw netlink request (UK_OP_NL) and read the raw reply; returns reply
  * length, or <0 on transport error. */
-static int ukw_nl_call(const uint8_t *req, int reqlen, uint8_t *out, int outcap)
+static int ukw_nl_call(uint32_t op, const uint8_t *req, int reqlen, uint8_t *out, int outcap)
 {
 	int s = ukw_connect(); if (s < 0) return -1;
-	struct ukw_req r = { UKW_OP_NL, 0, (uint32_t) reqlen };
+	struct ukw_req r = { op, 0, (uint32_t) reqlen };
 	int rc = -1;
 	if (write(s, &r, sizeof r) == (ssize_t) sizeof r &&
 	    (reqlen == 0 || write(s, req, (size_t) reqlen) == (ssize_t) reqlen)) {
@@ -152,7 +153,8 @@ static int ukw_event(unsigned last_gen, unsigned *cur, uint8_t *out, int outcap)
 /* Per-(tgid,genl-fd) state: a guest nl80211/genl netlink socket whose sendmsg is
  * ferried to the daemon (UK_OP_NL) and whose reply is drained by recvmsg. */
 struct wnl_fd { int used, pid, fd; uint8_t *reply; int rlen, roff; int sub; unsigned last_gen;
-                int is_packet, pkt_eapol; };   /* AF_PACKET: EAPOL (0x888e) vs monitor (ETH_P_ALL) */
+                int is_packet, pkt_eapol;   /* AF_PACKET: EAPOL (0x888e) vs monitor (ETH_P_ALL) */
+                int is_route; };            /* AF_NETLINK NETLINK_ROUTE (ip link/addr) */
 #define WNL_MAX 32
 static struct wnl_fd g_wnl[WNL_MAX];
 static int g_nwnl;
@@ -184,6 +186,11 @@ void uknl_wifi_mark_socket(Tracee *tracee)
 	if (fd < 0) return;
 	if (domain == 16 /* AF_NETLINK */ && proto == 16 /* NETLINK_GENERIC */) {
 		wnl_get(ukfs_tgid(tracee->pid), fd, 1);   /* nl80211 genl socket */
+		return;
+	}
+	if (domain == 16 /* AF_NETLINK */ && proto == 0 /* NETLINK_ROUTE */) {
+		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), fd, 1);   /* rtnetlink (ip) */
+		if (w) w->is_route = 1;
 		return;
 	}
 	if (domain == 17 /* AF_PACKET */) {
@@ -318,7 +325,7 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 				total += l;
 			}
 			uint8_t rep[16384];
-			int rl = ukw_nl_call(reqbuf, total, rep, sizeof rep);
+			int rl = ukw_nl_call(w->is_route ? UKW_OP_RTNL : UKW_OP_NL, reqbuf, total, rep, sizeof rep);
 			free(w->reply); w->reply = NULL; w->rlen = 0; w->roff = 0;
 			if (rl > 0) { w->reply = (uint8_t *) malloc(rl); if (w->reply) { memcpy(w->reply, rep, rl); w->rlen = rl; } }
 			UKW_RET(total);   /* report all bytes "sent" */

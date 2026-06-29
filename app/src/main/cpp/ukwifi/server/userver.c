@@ -126,6 +126,12 @@ static void *conn_thread(void *arg)
 			send_rsp(fd, n, nlout, (uint32_t)(n > 0 ? n : 0));
 			continue;
 		}
+		if (req.op == UK_OP_RTNL) {
+			static unsigned char rtout[16384];
+			int n = ukw_rtnl((const unsigned char *) payload, len, rtout, sizeof rtout);
+			send_rsp(fd, n, rtout, (uint32_t)(n > 0 ? n : 0));
+			continue;
+		}
 		if (req.op == UK_OP_NL_SCANGEN) {
 			send_rsp(fd, (int32_t) ukw_nl_scangen(), NULL, 0);
 			continue;

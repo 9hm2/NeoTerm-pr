@@ -70,6 +70,18 @@ int ukw_nl_dispatch(const uint8_t *in, size_t len, uint8_t *out, size_t cap)
 	return (int) n;
 }
 
+/* rtnetlink dispatch (ip link / ip addr) — defined in rtnetlink.c. */
+extern void ukw_rtnl_dispatch(const uint8_t *buf, size_t n, struct nl_buf *resp);
+int ukw_rtnl(const uint8_t *in, size_t len, uint8_t *out, size_t cap)
+{
+	struct nl_buf b; nlb_init(&b);
+	ukw_rtnl_dispatch(in, len, &b);
+	size_t n = b.len < cap ? b.len : cap;
+	if (n && out) memcpy(out, b.data, n);
+	nlb_free(&b);
+	return (int) n;
+}
+
 /* uknl_build_scan_event() is defined by nl80211_cmds.c; uknl_scan_gen above. */
 extern void uknl_build_scan_event(struct nl_buf *ev);
 

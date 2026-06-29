@@ -90,3 +90,33 @@ int uk_set_monitor(int wiphy_idx, int enable)
 	if (!f) f = dlsym(RTLD_DEFAULT, "ukernel_wiphy_set_monitor");
 	return f ? f((size_t) wiphy_idx, enable) : -1;
 }
+
+/* ---- rtnetlink (ip link / ip addr) backends ---- */
+int uk_set_ifflags(int netdev_idx, int up)
+{
+	static int (*f)(int, int);
+	if (!f) f = dlsym(RTLD_DEFAULT, "ukernel_netdev_set_up");
+	return f ? f(netdev_idx, up) : -1;
+}
+
+int uk_set_ifaddr(int netdev_idx, uint32_t ip, uint32_t netmask)
+{
+	(void) netdev_idx;   /* single wlan0 */
+	static void (*f)(uint32_t, uint32_t);
+	if (!f) f = dlsym(RTLD_DEFAULT, "ukernel_netdev_set_addr");
+	if (f) f(ip, netmask);
+	return 0;
+}
+
+int uk_set_mtu(int netdev_idx, int mtu)
+{
+	(void) netdev_idx;
+	static void (*f)(uint32_t);
+	if (!f) f = dlsym(RTLD_DEFAULT, "ukernel_netdev_set_mtu");
+	if (f) f((uint32_t) mtu);
+	return 0;
+}
+
+/* Cached real iface info (used by rtnetlink put_addr/put_route); just the live
+ * netdev — the DHCP-probe variant in the bridge isn't needed here. */
+int uknl_iface_info(struct uk_iface_info *out) { return uk_get_iface(0, out); }

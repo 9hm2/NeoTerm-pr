@@ -66,6 +66,7 @@ add_library(ukwifi_user OBJECT
   ${UKW_DIR}/nl/nl_dispatch.c
   ${UKW_DIR}/nl/genl_ctrl.c
   ${UKW_DIR}/nl/nl80211_cmds.c
+  ${UKW_DIR}/nl/rtnetlink.c
   ${UKW_DIR}/nl/userver_client_inproc.c
   ${UKW_DIR}/nl/nlglue.c)
 target_include_directories(ukwifi_user PRIVATE ${UKW_DIR}/nl)

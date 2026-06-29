@@ -43,6 +43,7 @@ enum uk_proxy_op {
 	UK_OP_NL         = 33, /* payload = nyers netlink kérés; válasz payload = netlink válasz (genl/nl80211) */
 	UK_OP_NL_EVENT   = 34, /* cmd = utoljára látott scan-gen; ret = aktuális gen, payload = NEW_SCAN_RESULTS ha új */
 	UK_OP_NL_SCANGEN = 35, /* ret = aktuális scan-generáció (poll-próbához, mellékhatás nélkül) */
+	UK_OP_RTNL       = 36, /* payload = nyers rtnetlink kérés (ip link/addr); válasz payload = rtnetlink válasz */
 };
 
 /* kulcs-telepítés a 4-way handshake után */

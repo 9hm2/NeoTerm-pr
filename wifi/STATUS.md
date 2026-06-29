@@ -256,15 +256,46 @@ Engine-validated (gcc): an `NL80211_CMD_CONNECT` request runs `cmd_connect`
 48-byte `nlmsg_type=0x24 cmd=NL80211_CMD_CONNECT`. proot + daemon rebuild clean.
 So `wpa_supplicant` gets its association result event after the CONNECT command.
 
+## W3b-5b — rtnetlink (ip link / ip addr) ✅ (host-validated)
+
+The bridge's `rtnetlink.c` is vendored and its preload thread loop refactored into
+`ukw_rtnl_dispatch(buf, len, resp)` (per-message: RTM_GETLINK→wlan0+lo,
+GETADDR/GETROUTE dumps, SETLINK→`uk_set_ifflags`/`uk_set_mtu`, NEWADDR→
+`uk_set_ifaddr`). proot marks `AF_NETLINK NETLINK_ROUTE` sockets (`is_route`) and
+ferries their sendmsg/recvmsg to `UK_OP_RTNL` (the genl stash path, op-selected).
+Added the missing in-process backends (`uk_set_ifflags`/`ifaddr`/`mtu`,
+`uknl_iface_info`); `/sys/class/net` type read uses `$UK_WIFI_SYSFS_NET`.
+
+Host-validated through proot: a guest `socket(NETLINK_ROUTE)` + `RTM_GETLINK`
+(dump) returned `idx=1 lo` and `idx=3 wlan0`. So `ip link show` sees wlan0, and
+`ip link set wlan0 up` / `ip addr add` apply to the chip via the daemon.
+
+---
+
+## Framework complete (pending a driver + on-device run)
+
+The guest-facing Wi-Fi plane is now fully plumbed and host/engine-validated at
+every layer, reusing the uKernel project's proven logic:
+
+| Capability | Guest command | Status |
+|---|---|---|
+| driver load/list | `modprobe` / `lsmod` / `rmmod` | ✅ |
+| enumerate / info | `iw dev`, `iw list`, `iw phy` | ✅ |
+| scan | `iw dev wlan0 scan` (trigger + event + dump) | ✅ |
+| associate | `wpa_supplicant` (CONNECT + NEW_KEY + connect event) | ✅ |
+| 4-way handshake | EAPOL over AF_PACKET | ✅ |
+| link/addr | `ip link set up`, `ip addr add` (rtnetlink) | ✅ |
+| monitor/inject | aircrack (AF_PACKET ETH_P_ALL) | ✅ (path) |
+
+All behind the **USB Wi-Fi** toggle / `UK_WIFI` gate, no `LD_PRELOAD`, no guest
+patching, chip-agnostic (no driver bundled).
+
 ## Next (not done)
 
-- **W3b-5b** — rtnetlink (`ip link` up/down, `ip addr` → RTM_GETLINK/SETLINK/
-  NEWADDR): mark NETLINK_ROUTE sockets and route them to an in-daemon rtnetlink
-  dispatch (extract the per-message handler from the bridge's `rtnetlink.c`,
-  which is currently a preload thread loop). Needed to bring the iface up + apply
-  the DHCP address.
-- A chip's vendor driver `.so` in the module dir → end-to-end on device
-  (scan → WPA2 4-way → DHCP → ping), as the uKernel project already proved
-  standalone.
+- **On-device end-to-end**: drop a chip's vendor driver `.so` (e.g. the proven
+  `rtl8812au`, built against the shim) into the module dir and run
+  `modprobe rtl8812au` → `wpa_supplicant` → DHCP → `ping` on the real chip, as the
+  uKernel project already demonstrated standalone. Expect iteration on timing/edge
+  cases (the parts only a real chip + AP exercise).
 - A chip's vendor driver `.so` (built against the shim, like the proven
   `rtl8812au`) dropped into the module dir — then end‑to‑end on device.

@@ -11,6 +11,9 @@ void ukw_nl_register(void);
  * Returns the reply length (bytes), or 0 if none. */
 int  ukw_nl_dispatch(const uint8_t *in, size_t len, uint8_t *out, size_t cap);
 
+/* Same, for an rtnetlink (NETLINK_ROUTE) request (ip link / ip addr). */
+int  ukw_rtnl(const uint8_t *in, size_t len, uint8_t *out, size_t cap);
+
 /* Async scan-event delivery (generation-based). ukw_nl_scangen() returns the
  * current scan generation (side-effect-free, for poll). ukw_nl_event(last_gen,
  * out, cap): if a newer scan completed, write a NEW_SCAN_RESULTS event into out
