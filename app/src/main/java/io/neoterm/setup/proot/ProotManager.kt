@@ -383,7 +383,11 @@ object ProotManager {
       args.add("NEOTERM_GPSD=127.0.0.1:2947")
     }
     args.add("XDG_RUNTIME_DIR=/tmp")
-    // Firefox's content sandbox can't work under proot (ptrace + no user
+    // Make the distro's unmodified systemd libudev accept our faked /sys/bus/usb:
+    // it otherwise refuses device dirs not on a real sysfs filesystem. This is a
+    // GUEST env var (libudev runs in the guest), so it must go here — the guest is
+    // launched with `env -i`, so proot's own environment is NOT inherited.
+    args.add("SYSTEMD_DEVICE_VERIFY_SYSFS=0")
     // namespaces) and SIGSEGVs its child processes; disable it so the browser
     // is usable. RDD is Firefox's media-decoder process — its sandbox blocks
     // libavcodec/ffmpeg from loading under proot ("no decoder found" for AAC/
@@ -514,11 +518,8 @@ object ProotManager {
     // libusb_init() (Android/SELinux blocks the netlink group bind). The USB host
     // bridge is always active, so this is always on. Scoped to netlink monitors.
     env.add("UK_USB=1")
-    // Make stock systemd libudev accept our faked /sys/bus/usb: it normally refuses
-    // any device dir not on a real sysfs filesystem (fd_is_fs_type SYSFS_MAGIC), but
-    // that check is gated by this env var. With it off, unmodified libusb/libudev
-    // enumerate USB devices from the proot-provided fake /sys — no patch, no preload.
-    env.add("SYSTEMD_DEVICE_VERIFY_SYSFS=0")
+    // (SYSTEMD_DEVICE_VERIFY_SYSFS is a GUEST env var — set in buildLaunch's `env -i`
+    //  list, not here; proot's own environment isn't inherited by the guest.)
     return env.toTypedArray()
   }
 }
