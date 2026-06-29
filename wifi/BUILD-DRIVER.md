@@ -1,17 +1,17 @@
-# Building & testing a Wi-Fi driver on-device (inside the proot guest)
+# USB Wi-Fi a proot guestben — teljes build, nulláról
 
-This is the end-to-end recipe to take a chip's **vendor kernel driver source**,
-build it **inside the proot Linux guest** (no PC, no NDK), and load it with
-`insmod`/`modprobe` so `iw`/`wpa_supplicant`/DHCP drive a real USB Wi-Fi dongle —
-no root, no guest kernel module, no LD_PRELOAD.
+Ez a recept a **teljes nullától** elvisz egy üres telefonig, és a végén egy
+valódi USB Wi-Fi dongle-ön `scan` → WPA2 → DHCP → `ping` fut a proot Linux
+guestből — **root nélkül**, guest-kernelmodul nélkül, `LD_PRELOAD` nélkül. A
+drivert **a telefonon, a guesten belül** fordítjuk (nem PC-n, nem NDK-val).
 
-> The framework is chip-agnostic and ships **without any driver**. You supply the
-> driver source for *your* dongle; everything else (kernel-API shim, cfg80211,
-> usbfs HCD, nl80211/rtnetlink bridge) is already in `libukwifid.so`.
+> A keretrendszer chip-agnosztikus, és **driver nélkül** szállít. A saját
+> dongle-öd vendor driver forrását te adod hozzá; minden más (kernel-API shim,
+> cfg80211, usbfs HCD, nl80211/rtnetlink bridge) már a `libukwifid.so`-ban van.
 
 ---
 
-## How it fits together (1-minute model)
+## Hogyan áll össze (1 perces modell)
 
 ```
   guest:  insmod rtl8812au.ko        iw / wpa_supplicant / dhclient
@@ -19,65 +19,121 @@ no root, no guest kernel module, no LD_PRELOAD.
             ▼  (proot UK_WIFI redirect)   ▼  (proot UK_WIFI redirect)
   app:    libukwifid.so  ── dlopen $UK_WIFI_MODDIR/rtl8812au.so ──┐
             kernel-API shim + cfg80211 + usbfs HCD                │
-            └── io.neoterm.usb (SCM_RIGHTS fd) ── real USB dongle ┘
+            └── io.neoterm.usb (SCM_RIGHTS fd) ── valódi USB dongle┘
 ```
 
-- `insmod`'s `finit_module` is trapped by the proot redirect; it reads the fd's
-  path, extracts the module **name**, and asks the daemon to `dlopen`
-  `$UK_WIFI_MODDIR/<name>.so`. **The `.ko` bytes are never used** — it's only a
-  name carrier. The real code is the `.so` you build below.
-- The driver `.so` runs in the **bionic** daemon, so it must be **libc-agnostic**
-  → we link it `-nostdlib`. See the header of `build-driver.sh` for the full why.
+- Az `insmod` `finit_module`-ját a proot redirect elkapja, kiolvassa az fd
+  path-jából a modul **nevét**, és a daemonnal `dlopen`-elteti a
+  `$UK_WIFI_MODDIR/<név>.so`-t. **A `.ko` bájtjait sosem használjuk** — csak
+  névhordozó. A valódi kód az alább buildelt `.so`.
+- A driver `.so` a **bionic** daemonban fut, ezért **libc-független** kell
+  legyen → `-nostdlib`-bal linkeljük (a részletes „miért” a `build-driver.sh`
+  fejlécében).
 
 ---
 
-## Prerequisites (one-time, in the guest)
+## 0. Telefon-oldal — a keretrendszer bekapcsolása (egyszeri)
+
+1. Telepítsd a NeoTerm APK-t (ezzel a Wi-Fi ággal buildelve), és indítsd el.
+2. **Settings → General → USB Wi-Fi (modprobe)** → **ON**.
+   Ez:
+   - elindítja a `libukwifid.so` daemont az `@io.neoterm.wifi` socketen,
+   - beállítja a guest előtt: `UK_WIFI=1` (proot redirect aktív),
+     `UK_WIFI_MODDIR=<rootfs>/lib/ukwifi`, `UK_WIFI_FW_DIR=<rootfs>/lib/firmware`,
+   - beköti a fake `/sys/class/net`, `/sys/class/ieee80211`, `/proc/modules`-t.
+3. Kapcsold be a **USB** togglet is (Settings → USB), és add meg az
+   `io.neoterm.usb` hozzáférést a dongle-höz, amikor a rendszer kéri — a Wi-Fi a
+   USB bridge-et használja a chip eléréséhez.
+4. Dugd be az USB Wi-Fi dongle-t (OTG).
+
+> Ezen a ponton a daemon fut, de **nincs driver** — a `wlan0` még nem létezik.
+
+---
+
+## 1. A proot guest telepítése (ha még nincs)
+
+A NeoTerm telepítőjéből telepíts egy glibc disztrót (pl. **Kali** vagy
+**Debian/Ubuntu**). Lépj be a guest shellbe. Innentől minden parancs **a
+guesten belül** fut.
 
 ```sh
-# 1) a native compiler
-apt update && apt install -y build-essential git
+# ellenőrizd, hogy a redirect aktív (a togglenak ON-nak kell lennie):
+echo "$UK_WIFI"            # -> 1
+echo "$UK_WIFI_MODDIR"     # -> .../lib/ukwifi   (ide kerül a driver .so)
+uname -r                   # az Android kernel verziója — ez lesz a .ko útvonalban
+```
 
-# 2) the uKernel fake-kernel headers (what the driver compiles against).
-#    Either clone this repo in the guest …
-git clone <this-repo> ~/neoterm && cd ~/neoterm
-#    … or, if you only want the headers, copy this one dir into the guest and
-#    export SHIM_INC to point at it:
-#        export SHIM_INC=~/ukfs-include   # contains net/cfg80211.h, linux/…, …
+---
 
-# 3) your dongle's vendor driver SOURCE (example: RTL8811AU/8812AU/8821AU)
+## 2. Build-eszközök telepítése a guestben
+
+```sh
+apt update
+apt install -y build-essential git
+```
+
+- **Kernel-headerre (`linux-headers-*`) NINCS szükség** — a shim helyettesíti.
+- **Firmware**: csak ha a chiped külső firmware-t tölt. Az RTL8811AU/8812AU
+  beágyazza, nem kell. Ha kell (pl. rtlwifi-s chip):
+  `apt install -y firmware-realtek` — a `request_firmware()` a guest
+  `/lib/firmware`-ből olvas (`$UK_WIFI_FW_DIR`).
+
+---
+
+## 3. A shim-headerek a guestbe
+
+A driver a uKernel **fake kernel-headerei** ellen fordul (ezek pótolják a
+`linux/*`, `net/*` kernel API-t). Két mód:
+
+```sh
+# A) klónozd ezt a repót a guestben (a build-script innen veszi a headert):
+git clone <ennek-a-repónak-az-URL-je> ~/neoterm
+cd ~/neoterm
+
+# B) vagy csak a header-könyvtárat másold be a guestbe és mutass rá:
+#    (a host app/src/main/cpp/ukfs/include könyvtár tartalmát)
+#    export SHIM_INC=~/ukfs-include
+```
+
+Ellenőrzés: léteznie kell a `app/src/main/cpp/ukfs/include/net/cfg80211.h`-nak
+(vagy `$SHIM_INC/net/cfg80211.h`-nak).
+
+---
+
+## 4. A chip vendor driver forrása a guestbe
+
+Példa RTL8811AU/8812AU/8821AU-ra (a uKernel projekt ezt bizonyította):
+
+```sh
 git clone https://github.com/aircrack-ng/rtl8812au ~/rtl8812au
 ```
 
-You do **not** need kernel headers (`linux-headers-*`) — the shim replaces them.
-You do **not** need `firmware-realtek` unless your chip loads external firmware
-(RTL8811AU/8812AU embed it). If it does, install it; `request_firmware()` reads
-from the guest `/lib/firmware` (`$UK_WIFI_FW_DIR`).
-
-Make sure the **USB Wi-Fi** toggle is ON in NeoTerm Settings (it starts the
-daemon and binds the sysfs/`/proc/modules` views and `$UK_WIFI_MODDIR`).
+Más chiphez a megfelelő **vendor** driver forrását klónozd (az in-kernel
+`rtl8xxxu` ezeket a chipeket nem fedi le). cfg80211-es drivert válassz, ne
+wext-eset.
 
 ---
 
-## Build
+## 5. Build (a guestben)
 
 ```sh
 cd ~/neoterm
 wifi/build-driver.sh ~/rtl8812au rtl8812au -DCONFIG_RTL8812A -DCONFIG_RTL8821A
 ```
 
-What it does:
-1. compiles every `.c` in the driver tree with the **fake kernel headers first**
-   (`-I app/src/main/cpp/ukfs/include`), `-ffreestanding -fno-stack-protector`;
-2. links `-shared -nostdlib --unresolved-symbols=ignore-all` →
-   a libc-agnostic `rtl8812au.so`;
-3. installs it to `/lib/ukwifi/rtl8812au.so` (`$UK_WIFI_MODDIR`);
-4. creates the `.ko` **name carrier** at
+A script:
+1. minden driver `.c`-t a **fake kernel-headerekkel előre**
+   (`-I .../ukfs/include`), `-ffreestanding -fno-stack-protector` fordít;
+2. `-shared -nostdlib --unresolved-symbols=ignore-all` linkel →
+   libc-független `rtl8812au.so`;
+3. telepíti `$UK_WIFI_MODDIR`-be (`/lib/ukwifi/rtl8812au.so`);
+4. létrehozza a `.ko` **névhordozót**
    `/lib/modules/$(uname -r)/kernel/drivers/net/wireless/ukwifi/rtl8812au.ko`
-   and runs `depmod`.
+   és lefuttat egy `depmod`-ot.
 
-### Chip CONFIG flags
-Vendor trees gate features behind `CONFIG_*` macros that the out-of-tree Kbuild
-normally sets. Pass the ones for your chip as `-D…`. Common rtl8812au set:
+### Chip CONFIG flagek
+A vendor fák `CONFIG_*` makrók mögé rejtik a funkciókat (ezeket normál esetben a
+Kbuild adja). A chipedhez tartozókat `-D…`-ként add át. Gyakori rtl8812au-készlet:
 
 ```
 -DCONFIG_RTL8812A -DCONFIG_RTL8821A -DCONFIG_IOCTL_CFG80211 \
@@ -85,24 +141,21 @@ normally sets. Pass the ones for your chip as `-D…`. Common rtl8812au set:
 -DCONFIG_WIFI_MONITOR -DCONFIG_MONITOR_MODE_XMIT
 ```
 
-If a compile fails with “undeclared `CONFIG_FOO`” or a whole feature `.c` erroring
-out, either add `-DCONFIG_FOO` or trim that source (point `build-driver.sh` at a
-subdir / pre-prune the tree). `-DCONFIG_IOCTL_CFG80211` is **required** — the
-framework speaks cfg80211, not wext.
+Ha „undeclared `CONFIG_FOO`” / egy feature-`.c` hibázik: add hozzá a
+`-DCONFIG_FOO`-t, vagy hagyd ki azt a forrást. A `-DCONFIG_IOCTL_CFG80211`
+**kötelező** — a keretrendszer cfg80211-et beszél, nem wext-et.
 
 ---
 
-## Load & test (from the guest)
+## 6. Betöltés + teszt (a guestből)
 
 ```sh
-insmod /lib/modules/$(uname -r)/kernel/drivers/net/wireless/ukwifi/rtl8812au.ko
-#  …or simply:  modprobe rtl8812au
+modprobe rtl8812au            # vagy: insmod /lib/modules/$(uname -r)/.../rtl8812au.ko
+lsmod | grep rtl8812au        # a daemon /proc/modules-ából
+ip link                       # wlan0 megjelenik
+iw dev                        # phy#0 / wlan0, csatornák
 
-lsmod | grep rtl8812au           # served from the daemon via /proc/modules
-ip link                          # wlan0 should appear
-iw dev                           # phy#0 / wlan0, channels
-
-# bring it up + scan
+# felhozás + scan
 ip link set wlan0 up
 iw dev wlan0 scan | grep SSID
 
@@ -111,26 +164,27 @@ cat > /tmp/wpa.conf <<EOF
 network={ ssid="YOURSSID" psk="YOURPASS" }
 EOF
 wpa_supplicant -i wlan0 -c /tmp/wpa.conf -B
-dhclient wlan0        # or: udhcpc -i wlan0
+dhclient wlan0                # vagy: udhcpc -i wlan0
 ping -c3 1.1.1.1
 
-# monitor / injection (optional)
+# monitor / injection (opcionális)
 iw dev wlan0 set type monitor && ip link set wlan0 up
 ```
 
-`rmmod rtl8812au` (or `modprobe -r`) unloads it (daemon `dlclose` + `module_exit`).
+`rmmod rtl8812au` (vagy `modprobe -r`) kiadja (daemon `dlclose` + `module_exit`).
 
 ---
 
-## Troubleshooting
+## Hibakeresés
 
-| symptom | cause / fix |
+| tünet | ok / megoldás |
 |---|---|
-| `modprobe: nincs modul .so` in `ukwifid.log` | the `.so` isn't in `$UK_WIFI_MODDIR` — rerun the build, or check the toggle set `UK_WIFI_MODDIR=<rootfs>/lib/ukwifi` |
-| `dlopen … cannot locate symbol` at insmod | a kernel API the driver needs isn't in the shim yet — note the symbol; it's a shim gap, not a build flag |
-| `nincs firmware: …` | install your chip's firmware into the guest `/lib/firmware` (e.g. `apt install firmware-realtek`) |
-| compile error on a feature file | add the matching `-DCONFIG_*`, or drop that source |
-| `wlan0` never appears | probe found no device — check `lsusb` sees the dongle and the **USB** toggle/`io.neoterm.usb` is up (Wi-Fi reuses the USB bridge) |
+| `modprobe: nincs modul .so` a `ukwifid.log`-ban | a `.so` nincs `$UK_WIFI_MODDIR`-ben — buildelj újra, vagy ellenőrizd a toggle `UK_WIFI_MODDIR`-jét |
+| `dlopen … cannot locate symbol` insmodkor | egy kernel API, amit a driver kér, még nincs a shimben — jegyezd a szimbólum nevét; ez shim-hiány, nem build-flag |
+| `nincs firmware: …` | telepítsd a chip firmware-ét a guest `/lib/firmware`-be (pl. `apt install firmware-realtek`) |
+| compile hiba egy feature-fájlon | add a megfelelő `-DCONFIG_*`-ot, vagy hagyd ki azt a forrást |
+| `wlan0` sosem jelenik meg | a probe nem talált eszközt — `lsusb` lássa a dongle-t, és a **USB** toggle/`io.neoterm.usb` legyen fent |
+| `echo $UK_WIFI` üres | a USB Wi-Fi toggle nincs ON, vagy a guestet a bekapcsolás előtt indítottad — indítsd újra a guestet |
 
-Logs: the daemon writes `filesDir/ukwifid.log` (probe/modprobe/firmware lines are
-in Hungarian, prefixed `ukwifi/…`).
+Logok: a daemon a `filesDir/ukwifid.log`-ba ír (a probe/modprobe/firmware sorok
+magyarul, `ukwifi/…` prefixszel).
