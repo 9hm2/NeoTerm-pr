@@ -152,6 +152,20 @@ a real port; an `AF_NETLINK` group bind that the kernel would reject returns 0 o
 under `UK_USB`. Wired in `fakeid0-xattr.py` (dispatch after the camera shim + a
 `UK_USB` seccomp filter trapping `bind`); `ProotManager` exports `UK_USB=1`.
 
+Refinement (device round 2): faking only `bind()` did NOT fix it — the failure is
+the **socket() creation**, not the bind. `udev_monitor_new_from_netlink` returns
+NULL because `socket(AF_NETLINK, …, NETLINK_KOBJECT_UEVENT)` is itself SELinux-
+blocked for app uids. So the shim now (UK_USB):
+1. **socket()**: rewrites protocol `NETLINK_KOBJECT_UEVENT`→`NETLINK_ROUTE` (app
+   uids may create that) so the call succeeds and libusb gets a real, pollable fd;
+2. **bind()** (AF_NETLINK, groups≠0): faked success;
+3. **setsockopt(SOL_NETLINK, NETLINK_ADD_MEMBERSHIP)**: faked success.
+With bind+membership neutralised the socket is never actually subscribed, so no
+events flow (no hotplug) but `udev_monitor_new_from_netlink` /
+`udev_monitor_enable_receiving` both succeed → `libusb_init()` succeeds.
+Host-verified: under UK_USB the uevent socket's `SO_PROTOCOL` becomes 0
+(NETLINK_ROUTE); AF_INET sockets are untouched.
+
 → Next, on device: confirm `lsusb` now initialises and whether it enumerates from
 the (available) sysfs. If enumeration is empty (sysfs readdir EACCES), add the
 fake `/sys/bus/usb`. Then `/dev/bus/usb` + the USBDEVFS ioctl proxy for I/O.
