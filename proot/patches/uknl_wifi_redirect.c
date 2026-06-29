@@ -347,15 +347,14 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 		 * fails (this is what made GETFAMILY resolve to "nl80211 not found"). */
 		int recv_flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
 		int peek = (recv_flags & 2 /* MSG_PEEK */) != 0;
-		int copied = 0;
+		int copied = 0;     /* bytes actually written to the caller's iov */
+		int msglen = -1;    /* full length of the delivered message (>=0 if one is available) */
 		if (w->reply && w->roff < w->rlen) {
 			/* Deliver exactly ONE netlink message per recvmsg, mirroring the
-			 * kernel's datagram semantics. libnl stops parsing a datagram after
-			 * the first non-multipart message and issues a fresh recvmsg for the
-			 * ACK; if we hand it NEWFAMILY+ACK concatenated in one recvmsg it
-			 * processes NEWFAMILY, ignores the trailing ACK, reads again and gets
-			 * EAGAIN -> "nl80211 not found". So copy a single nlmsg (length from
-			 * the nlmsghdr) and advance by NLMSG_ALIGN to the next one. */
+			 * kernel's datagram semantics. libnl/iproute2 stop parsing a datagram
+			 * after the first non-multipart message and issue a fresh recvmsg for
+			 * the ACK; concatenating NEWFAMILY+ACK in one recvmsg loses the ACK.
+			 * Copy a single nlmsg (length from its nlmsghdr) and NLMSG_ALIGN-advance. */
 			int avail = w->rlen - w->roff;
 			int mlen = avail;
 			if (avail >= 4) {
@@ -370,7 +369,7 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 				if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, w->reply + w->roff + off, (word_t) n) < 0) break;
 				off += n;
 			}
-			copied = off;
+			copied = off; msglen = mlen;
 			if (!peek) {                       /* peek must not consume */
 				int adv = (mlen + 3) & ~3;     /* NLMSG_ALIGN to the next message */
 				w->roff += (adv <= avail ? adv : avail);
@@ -379,15 +378,23 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			uint8_t ev[2048]; unsigned cur = w->last_gen;
 			int el = ukw_event(w->last_gen, &cur, ev, sizeof ev);
 			w->last_gen = cur;
-			for (unsigned long i = 0; i < niov && copied < el; i++) {
-				int want = (int) iov[i].iov_len, avail = el - copied;
-				int n = want < avail ? want : avail;
-				if (n <= 0) continue;
-				if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, ev + copied, (word_t) n) < 0) break;
-				copied += n;
+			if (el > 0) {
+				int off = 0;
+				for (unsigned long i = 0; i < niov && off < el; i++) {
+					int want = (int) iov[i].iov_len, rem = el - off;
+					int n = want < rem ? want : rem;
+					if (n <= 0) continue;
+					if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, ev + off, (word_t) n) < 0) break;
+					off += n;
+				}
+				copied = off; msglen = el;
 			}
 		}
-		if (copied == 0) UKW_RET(-EAGAIN);
+		if (msglen < 0) UKW_RET(-EAGAIN);   /* nothing pending */
+		/* MSG_PEEK|MSG_TRUNC: the caller (iproute2 peeks with iov_len=0) sizes its
+		 * buffer from the return value, which must be the FULL message length even
+		 * if less (or nothing) was copied. Report msglen on peek; copied otherwise. */
+		int retlen = peek ? msglen : copied;
 		/* The message is from the "kernel": libnl's nl_recv REQUIRES the source
 		 * address to be a full sockaddr_nl (msg_namelen == sizeof) with nl_family
 		 * AF_NETLINK, else it returns -NLE_NOADDR and drops the reply (this is why
@@ -403,8 +410,10 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			mh.msg_namelen = 0;
 		}
 		mh.msg_controllen = 0; mh.msg_flags = 0;
+		/* MSG_TRUNC: if the buffer was smaller than the message, flag truncation. */
+		if (copied < msglen) mh.msg_flags |= 0x20 /* MSG_TRUNC */;
 		write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), &mh, sizeof mh);
-		UKW_RET(copied);
+		UKW_RET(retlen);
 	}
 
 	/* setsockopt(SOL_NETLINK, NETLINK_ADD_MEMBERSHIP) on a marked fd: record the
