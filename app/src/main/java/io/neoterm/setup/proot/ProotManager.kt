@@ -183,6 +183,23 @@ object ProotManager {
     bind(args, "/dev")
     bind(args, "/proc")
     bind(args, "/sys")
+    // App-adatkönyvtár átkötése a guestbe AZONOS abszolút úton, hogy a proot-ból
+    // ugyanazokat a fájlokat lássuk, amelyeket az app-oldali daemonok használnak:
+    //  - a ukwifid/ukfsd logok (files/ukwifid.log),
+    //  - a daemon abszolút útjai (pl. UK_WIFI_MODDIR=.../rootfs/<distro>/lib/ukwifi,
+    //    UK_WIFI_FW_DIR=.../lib/firmware) — így a `modprobe` által a daemonba dlopen-
+    //    elt .so helye a guestből is ellenőrizhető/írható, és a hibakeresés a guestből
+    //    megy. A guest amúgy is az app uid-jával fut, ezért ez nem új jogosultság, csak
+    //    láthatóság. Android: /data/data/<pkg> és /data/user/0/<pkg> ugyanaz (symlink),
+    //    mindkét nevet kötjük, hogy bármelyik abszolút út feloldódjon.
+    runCatching {
+      val dataDir = io.neoterm.App.get().applicationInfo.dataDir   // /data/.../io.neoterm
+      if (!dataDir.isNullOrEmpty() && File(dataDir).isDirectory) {
+        val pkg = io.neoterm.App.get().packageName
+        bind(args, dataDir, "/data/data/$pkg")
+        bind(args, dataDir, "/data/user/0/$pkg")
+      }
+    }
     // Hide Android's SELinux from the guest. Android mounts selinuxfs at
     // /sys/fs/selinux, so the distro's SELinux-aware tools (su / PAM, runuser,
     // login, sudo, cron, sshd) think SELinux is enabled and abort in libselinux's
