@@ -29,9 +29,13 @@ set(UKW_WARN
 set(UKW_CFLAGS -fPIC -O2 -fno-strict-aliasing -D_GNU_SOURCE -pthread ${UKW_WARN})
 
 # --- core kernel-API shim (shared with the FS engine): kmalloc/printk/sync/
-#     sched/module-inits/... fileio.c pulls glue we don't want here; drop it. ---
+#     sched/module-inits/... INCLUDING fileio.c, which carries kernel globals +
+#     helpers a Wi-Fi driver needs and nothing else here provides: init_net (the
+#     initial netns the driver references), filp_open/kernel_read/kernel_write
+#     (efuse/firmware file reads), dev_alloc_name (wlan%d), get_random_* (strong;
+#     compat_bionic's is weak and yields), the radiotap iterator. The FS engine
+#     drops fileio.c (it has its own vfs.c); the Wi-Fi daemon needs it. ---
 file(GLOB UKW_SHIM_CORE ${UKFS_DIR}/shim/core/*.c)
-list(FILTER UKW_SHIM_CORE EXCLUDE REGEX "/fileio\\.c$")
 
 # ============================================================================
 # Kernel-side translation units: the fake <linux/*>,<net/*> headers must come
