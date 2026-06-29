@@ -38,9 +38,13 @@ ALPINE_BRANCH="${ALPINE_BRANCH:-v3.20}"
 
 # Egy könyvtár-index (HTML) tartalmából kiszedi a mintára illeszkedő LEGÚJABB
 # fájlnevet (verzió szerint rendezve). Így nem kell pontverziót hardcode-olni.
+# Some mirrors (kali.download, ubuntu cdimage CDNs) 403 the default curl UA from
+# CI runners; send a browser-ish UA. -L follows redirects to the actual mirror.
+CURL_UA="${CURL_UA:-Mozilla/5.0 (X11; Linux aarch64) NeoTerm-CI}"
+
 latest_in_dir() {
   local dir_url="$1" pattern="$2"
-  curl -fsSL --retry 4 --retry-delay 2 "${dir_url}" \
+  curl -fsSL -A "${CURL_UA}" --retry 4 --retry-delay 2 "${dir_url}" \
     | grep -oE "${pattern}" | sort -V | uniq | tail -n1
 }
 
@@ -54,7 +58,7 @@ mirror() {
   local url="$1" out_file="$2"
   echo "[fetch] ${url}"
   mkdir -p "$(dirname "${out_file}")"
-  curl -fL --retry 4 --retry-delay 2 -o "${out_file}" "${url}"
+  curl -fL -A "${CURL_UA}" --retry 4 --retry-delay 2 -o "${out_file}" "${url}"
   ( cd "$(dirname "${out_file}")" && sha256sum "$(basename "${out_file}")" > "$(basename "${out_file}").sha256" )
   ls -lh "${out_file}"
 }
