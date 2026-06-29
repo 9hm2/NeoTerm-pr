@@ -349,15 +349,32 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 		int peek = (recv_flags & 2 /* MSG_PEEK */) != 0;
 		int copied = 0;
 		if (w->reply && w->roff < w->rlen) {
-			int roff0 = w->roff;
-			for (unsigned long i = 0; i < niov && w->roff < w->rlen; i++) {
-				int want = (int) iov[i].iov_len, avail = w->rlen - w->roff;
-				int n = want < avail ? want : avail;
-				if (n <= 0) continue;
-				if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, w->reply + w->roff, (word_t) n) < 0) break;
-				w->roff += n; copied += n;
+			/* Deliver exactly ONE netlink message per recvmsg, mirroring the
+			 * kernel's datagram semantics. libnl stops parsing a datagram after
+			 * the first non-multipart message and issues a fresh recvmsg for the
+			 * ACK; if we hand it NEWFAMILY+ACK concatenated in one recvmsg it
+			 * processes NEWFAMILY, ignores the trailing ACK, reads again and gets
+			 * EAGAIN -> "nl80211 not found". So copy a single nlmsg (length from
+			 * the nlmsghdr) and advance by NLMSG_ALIGN to the next one. */
+			int avail = w->rlen - w->roff;
+			int mlen = avail;
+			if (avail >= 4) {
+				uint32_t l; memcpy(&l, w->reply + w->roff, 4);
+				if (l >= 16 && (int) l <= avail) mlen = (int) l;
 			}
-			if (peek) w->roff = roff0;   /* peek must not consume */
+			int off = 0;
+			for (unsigned long i = 0; i < niov && off < mlen; i++) {
+				int want = (int) iov[i].iov_len, rem = mlen - off;
+				int n = want < rem ? want : rem;
+				if (n <= 0) continue;
+				if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, w->reply + w->roff + off, (word_t) n) < 0) break;
+				off += n;
+			}
+			copied = off;
+			if (!peek) {                       /* peek must not consume */
+				int adv = (mlen + 3) & ~3;     /* NLMSG_ALIGN to the next message */
+				w->roff += (adv <= avail ? adv : avail);
+			}
 		} else if (w->sub) {
 			uint8_t ev[2048]; unsigned cur = w->last_gen;
 			int el = ukw_event(w->last_gen, &cur, ev, sizeof ev);
