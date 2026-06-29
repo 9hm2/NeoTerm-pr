@@ -133,17 +133,33 @@ A script:
 
 ### Chip CONFIG flagek
 A vendor fák `CONFIG_*` makrók mögé rejtik a funkciókat (ezeket normál esetben a
-Kbuild adja). A chipedhez tartozókat `-D…`-ként add át. Gyakori rtl8812au-készlet:
+Kbuild adja). A **chip-választást** te adod át `-D…`-ként (a parancsban:
+`-DCONFIG_RTL8812A -DCONFIG_RTL8821A`).
+
+A többi Realtek-flaget a script **automatikusan** beállítja (a bizonyított
+uKernel `rtl8812au.mk`-ból), köztük a **legfontosabbat**:
+`-DDM_ODM_SUPPORT_TYPE=0x04` (ODM_CE = Linux). **Enélkül a `hal/phydm` alrendszer
+NEM fordul** (`enumerator value … not an integer constant`, `field 'mpt_dig_timer'
+has incomplete type`, `ASSOCIATE_ENTRY_NUM undeclared` — ~140 fájl). Továbbá:
+`-DCONFIG_LITTLE_ENDIAN -DCONFIG_WIFI_MONITOR -DCONFIG_MONITOR_MODE_XMIT
+-DCONFIG_TXPWR_BY_RATE=1 -DDRV_NAME -DEFUSE_MAP_PATH`. Ezt a csoportot a
+`$RTW_CONFIG` env-vel írhatod felül (nem-Realtek chipnél: `RTW_CONFIG=""`).
+A `-DCONFIG_IOCTL_CFG80211` mindig be van kapcsolva — a keretrendszer cfg80211-et
+beszél, nem wext-et.
+
+### Nem-cél fájlok kihagyása
+A script **nem fordítja le mind a 209 forrást** — a vendor fa más buszok/
+platformok/chipek fájljait is tartalmazza, amiket a Kbuild USB-STA buildnél
+sosem fordít (és nálunk hiányzó headereken buknának: `mach/*.h`,
+`linux/mmc/sdio_func.h`, `linux/jhash.h`). A proven build ~145 fájlt fordított.
+Az alapértelmezett kihagyás (felülírható a `$EXCLUDE` env-vel, kiterjesztett regex):
 
 ```
--DCONFIG_RTL8812A -DCONFIG_RTL8821A -DCONFIG_IOCTL_CFG80211 \
--DRTW_USE_CFG80211_STA_EVENT -DCONFIG_CONCURRENT_MODE \
--DCONFIG_WIFI_MONITOR -DCONFIG_MONITOR_MODE_XMIT
+platform/*  ·  *sdio*/*gspi*/*pci*  ·  rhashtable.c  ·  rtw_mp*/rtw_bt_mp/rtw_eeprom/rtw_ioctl_rtl
 ```
 
-Ha „undeclared `CONFIG_FOO`” / egy feature-`.c` hibázik: add hozzá a
-`-DCONFIG_FOO`-t, vagy hagyd ki azt a forrást. A `-DCONFIG_IOCTL_CFG80211`
-**kötelező** — a keretrendszer cfg80211-et beszél, nem wext-et.
+Ha egy chip más feature-`.c`-t igényel: add hozzá a `-DCONFIG_FOO`-t, vagy bővítsd
+a `$EXCLUDE`-ot. Mindent fordítani (nem-Realtek driver): `EXCLUDE='' …`.
 
 ---
 

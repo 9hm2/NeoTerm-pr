@@ -70,14 +70,26 @@ while IFS= read -r -d '' d; do DRV_INC+=( -I"$d" ); done \
   < <(find "$SRC" -type f \( -name '*.h' -o -name '*.hpp' \) -printf '%h\0' | sort -zu)
 echo "build-driver: ${#DRV_INC[@]} driver include dirs"
 
+# Realtek vendor-tree defaults — the EXACT flags the proven uKernel build used
+# (build/rtl8812au.mk). The critical one is DM_ODM_SUPPORT_TYPE=0x04 (ODM_CE =
+# Customer-Embedded = Linux): without it the phydm HAL's enums/struct fields
+# don't assemble and ~all hal/phydm/*.c fail ("enumerator value … not an integer
+# constant", "field 'mpt_dig_timer' has incomplete type", "ASSOCIATE_ENTRY_NUM
+# undeclared"). These macros are Realtek-specific and inert for non-Realtek
+# drivers; override the whole group with $RTW_CONFIG="" if your chip differs.
+RTW_CONFIG="${RTW_CONFIG:- -DDM_ODM_SUPPORT_TYPE=0x04 -DCONFIG_LITTLE_ENDIAN \
+  -DCONFIG_TXPWR_BY_RATE=1 -DCONFIG_WIFI_MONITOR -DCONFIG_MONITOR_MODE_XMIT \
+  -DDRV_NAME=\"$OUT\" -DEFUSE_MAP_PATH=\"$MODDIR/$OUT.efuse\"}"
+
 # Fake kernel headers come FIRST (-I) so <linux/*>,<net/*> shadow the distro's
-# real ones; the sysroot still provides <stdint.h>, <stddef.h> etc. This mirrors
-# the ukwifi_kshim group in ukwifi.cmake exactly (same -Wno set, same -ffree-
-# standing intent), just with the guest's native cc instead of the NDK clang.
+# real ones; the sysroot still provides <stdint.h>, <stddef.h> etc. -O2 (NOT -O0:
+# the proven build NULL-derefs at -O0 in _init_timer). Mirrors rtl8812au.mk; the
+# user's chip-select (-DCONFIG_RTL8812A …) comes via "${EXTRA[@]}" and wins last.
 CFLAGS=(
-  -fPIC -O2 -fno-strict-aliasing -ffreestanding -fno-stack-protector
+  -fPIC -O2 -fno-strict-aliasing -fno-stack-protector
   -fno-common -D_GNU_SOURCE -DKBUILD_MODNAME="\"$OUT\""
-  -DUKERNEL_DRIVER_BUILD -DCONFIG_IOCTL_CFG80211 -DRTW_USE_CFG80211_STA_EVENT
+  -DUKERNEL_DRIVER_BUILD -DCONFIG_IOCTL_CFG80211
+  $RTW_CONFIG
   -I"$SHIM_INC"                     # fake kernel API — must win
   "${DRV_INC[@]}"                   # driver's own header dirs (auto-discovered)
   # kernel-ism suppressions (clang-on-NDK set; harmless on gcc)
@@ -88,11 +100,30 @@ CFLAGS=(
 )
 
 # --- collect sources -------------------------------------------------------
-# Build every .c under the driver tree. Vendor trees are big but self-contained;
-# the kernel symbols they reference resolve at load time from the daemon.
-mapfile -d '' SRCS < <(find "$SRC" -name '*.c' -print0)
-[ "${#SRCS[@]}" -gt 0 ] || die "no .c files under $SRC"
-echo "build-driver: ${#SRCS[@]} source files"
+# A vendor tree ships sources for OTHER buses/platforms/chips that its Kbuild
+# never compiles for a USB STA build (selected by CONFIG_*). Building them all
+# fails on headers we don't have (mach/*.h, linux/mmc/sdio_func.h, linux/jhash.h)
+# or test-only types (PMPT_CONTEXT, NDIS_STATUS, sint/BOOLEAN). The proven uKernel
+# build compiled a curated ~145-file subset, not the full 209. Mirror that by
+# excluding the non-target categories — same effect as the vendor Kbuild gates:
+#   platform/*          -> CONFIG_PLATFORM_*   (we're generic)
+#   *sdio*/*gspi*/*pci*  -> bus != USB
+#   rhashtable.c        -> CONFIG_RTW_MESH
+#   rtw_mp*/rtw_bt_mp/rtw_eeprom/rtw_ioctl_rtl -> CONFIG_MP_INCLUDED / legacy
+# Override with $EXCLUDE (an extended-regex over full paths); set EXCLUDE='' to
+# build everything (e.g. a non-Realtek driver that needs no curation).
+DEFAULT_EXCLUDE='/platform/|sdio|gspi|_pci|pcie|/rhashtable\.c|/rtw_mp\.c|/rtw_mp_ioctl\.c|/rtw_bt_mp\.c|/rtw_eeprom\.c|/rtw_ioctl_rtl\.c'
+EXCLUDE="${EXCLUDE-$DEFAULT_EXCLUDE}"
+SRCS=()
+nexcl=0
+while IFS= read -r -d '' s; do
+  if [ -n "$EXCLUDE" ] && printf '%s' "$s" | grep -Eq "$EXCLUDE"; then
+    nexcl=$((nexcl+1)); continue
+  fi
+  SRCS+=("$s")
+done < <(find "$SRC" -name '*.c' -print0)
+[ "${#SRCS[@]}" -gt 0 ] || die "no .c files under $SRC (after exclude)"
+echo "build-driver: ${#SRCS[@]} source files ($nexcl excluded as non-target; \$EXCLUDE)"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 OBJS=()
