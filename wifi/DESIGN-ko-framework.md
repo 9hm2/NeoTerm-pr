@@ -1,5 +1,16 @@
 # Chip‑agnostic framework for real kernel modules (.ko) — direction analysis
 
+> **DECISION (rejected): the .ko / LKL direction is NOT pursued.** After review we
+> stay with the existing uKernel **shim + `.so`** approach (see `DESIGN.md`): a
+> chip‑agnostic framework where each chip's vendor driver is compiled to a `.so`
+> and plugged in later; the driver is not needed for the framework itself. This
+> document is kept only as the record of why `.ko`/LKL was considered and dropped
+> (real‑`.ko` loading needs the real kernel ABI → LKL → too heavy / version‑locked
+> for this target).
+
+---
+
+
 Revised requirement (supersedes the per‑chip `.so` plan in `DESIGN.md` for the
 *framework* layer):
 

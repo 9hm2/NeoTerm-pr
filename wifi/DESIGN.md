@@ -7,8 +7,14 @@ toggle** + a **`UK_*` env gate**, with **no `LD_PRELOAD` and no guest changes**.
 
 This document assesses the uploaded **uKernel** project (a proven userspace
 Wi‑Fi stack) for buildability into **bionic/aarch64** and lays out the wiring,
-so the implementation can start from a known plan. It is preparation only — no
-runtime code yet.
+so the implementation can start from a known plan.
+
+> **DECISION (active plan):** we build on the uKernel **shim + `.so`** approach.
+> The `.ko`/LKL alternative was analysed and **rejected** (see
+> `DESIGN-ko-framework.md`). The framework is **chip‑agnostic**: the daemon loads
+> a chip's vendor driver `.so` at runtime, so **no driver is bundled now** — only
+> the fully‑prepared, driver‑independent framework is built; a specific chip's
+> `.so` is plugged in later. (No `modprobe`/`.ko` path.)
 
 ---
 
