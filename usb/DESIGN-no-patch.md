@@ -248,6 +248,54 @@ Options that remain (all leave master/patch as-is):
 The UK_USB netlink init-fix on this branch is still worth keeping if a future
 preload/no-patch path is pursued (it removes the -99 independently).
 
+## Device round 5: pure-proot real-udev — blocked by systemd sd-device validation
+
+Goal refined by the user: run the **real, unmodified udev/libudev** under proot
+(no LD_PRELOAD, no guest build), everything provided by NeoTerm + proot. proot
+*can* intercept the syscalls, and we control proot, so in principle this should be
+doable.
+
+Confirmed proot handles the obvious things: `/proc/self/fd/N` for a bound path
+reverse-translates to the **guest** path (`/sys/bus/usb/devices/1-1`), not the host
+bind path. So canonicalisation input is correct.
+
+But the real (systemd 255) libudev still returns **0 devices** from a faked `/sys`,
+whether provided by a proot bind or a plain mount-namespace bind. Straced it
+side-by-side against the working umockdev run and ruled out, one by one:
+- descriptors binary encoding (fixed; libusb reads them fine);
+- complete vs partial fake `/sys` (complete bind-mount also fails);
+- `/proc/self/fd` translation (proot returns the guest path correctly);
+- `/run/udev/data/...` initialised-DB entry (umockdev works **without** it);
+- `statfs()` magic — hypothesised libudev requires `SYSFS_MAGIC`, but umockdev's
+  own `/sys` reports `EXT2_SUPER_MAGIC` and still works; faking `SYSFS_MAGIC` on a
+  bind-mount `/sys` did **not** help. Red herring.
+
+In the failing trace, libudev finds `1-1`, resolves it to `/sys/devices/1-1`
+(manual `..`-walk + `/proc/self/fd`), then **discards it before reading `uevent`**.
+umockdev gets past this only because its preload replaces ~40 libc functions
+(open/stat/lstat/readlink/scandir/opendir/statfs/…) so sd-device's in-process path
+validation sees a fully self-consistent fake. proot's **syscall-level** redirect
+provides correct results but does not reproduce that in-process consistency, and
+the exact sd-device check that rejects the device is buried in systemd internals
+(not crackable without sd-device source-level debugging; `ltrace` unavailable;
+no nested `strace` under proot).
+
+### Honest conclusion
+- **Solved & on branch:** `libusb_init` (the -99) via the UK_USB netlink
+  socket/bind/setsockopt fakes — pure proot, no guest changes.
+- **Not achievable as pure-proot right now:** making the **unmodified systemd
+  libudev enumerate** from a proot-provided `/sys`. It is gated by sd-device
+  in-process validation that only a comprehensive libc preload (umockdev-style)
+  satisfies — i.e. exactly the LD_PRELOAD approach ruled out. Cracking it is a
+  systemd-internals research effort with uncertain payoff.
+
+### Where that leaves the options
+1. **Keep `build-neoterm-libusb.sh`** (works fully) — needs an in-guest build.
+2. **Deep systemd sd-device study** to find and satisfy the exact validation via
+   proot path-op handling — uncertain, possibly large.
+3. **Accept** that unmodified-libudev enumeration needs in-process interception
+   (preload) which is out of scope by the no-preload/no-patch constraint.
+
 ## Assessment (superseded by the breakthrough above — kept for history)
 
 The no-patch path is a real **research effort**, materially harder than the camera:
