@@ -80,6 +80,18 @@ int ukw_modprobe(const char *name)
 	}
 	struct mod *m = slot();
 	if (!m) return -3;
+	/* The driver .so is linked -nostdlib (so a glibc-cross-built .so carries no
+	 * DT_NEEDED libc.so.6 that bionic couldn't load). Its libc references
+	 * (memcmp/snprintf/strsep/...) must then resolve from the GLOBAL group at
+	 * dlopen — but bionic doesn't put the executable's libc there for an arbitrary
+	 * dlopen'd object. Promote libc/libm/libdl into the global group first
+	 * (RTLD_NOLOAD returns the already-loaded copy; RTLD_GLOBAL adds it to the
+	 * global lookup scope), so the driver resolves the C library from bionic. The
+	 * kernel API (cfg80211/usb/skbuff/printk/init_net/...) resolves from our own
+	 * image, exported via -Wl,--export-dynamic. */
+	dlopen("libc.so",  RTLD_NOW | RTLD_GLOBAL | RTLD_NOLOAD);
+	dlopen("libm.so",  RTLD_NOW | RTLD_GLOBAL | RTLD_NOLOAD);
+	dlopen("libdl.so", RTLD_NOW | RTLD_GLOBAL | RTLD_NOLOAD);
 	void *h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);   /* driver resolves cfg80211/usb/shim from our image */
 	if (!h) { fprintf(stderr, "ukwifi/modmgr: dlopen %s: %s\n", path, dlerror()); return -4; }
 	if (g_ops.run_inits && g_ops.run_inits() != 0)
