@@ -133,17 +133,34 @@ void ukw_rtnl_dispatch(const uint8_t *buf, size_t n, struct nl_buf *resp)
 
 			if (type == RTM_GETLINK) {
 				struct ifinfomsg *ifi = (struct ifinfomsg *)((char *)nlh + NLMSG_HDRLEN);
-				int want_idx = (!dump && nlh->nlmsg_len >= NLMSG_HDRLEN + sizeof(*ifi)) ? ifi->ifi_index : 0;
+				int has_ifi = nlh->nlmsg_len >= NLMSG_HDRLEN + sizeof(*ifi);
+				int want_idx = (!dump && has_ifi) ? ifi->ifi_index : 0;
+				/* A non-dump GETLINK az interfészt NÉV szerint is kérheti
+				 * (ip link set wlan0 up -> ifi_index=0 + IFLA_IFNAME=wlan0). A nevet
+				 * ki kell olvasni és arra szűrni — különben az összes linket
+				 * visszaadnánk, az ip csak az elsőt olvassa, a többi a stash-ben
+				 * marad és deszinkronizálja a következő kérést (végtelen retry). */
+				char want_name[16] = "";
+				if (!dump && has_ifi) {
+					struct rtattr *rta = (struct rtattr *)((char *)ifi + NLMSG_ALIGN(sizeof(*ifi)));
+					int rlen = (int)nlh->nlmsg_len - NLMSG_HDRLEN - (int)NLMSG_ALIGN(sizeof(*ifi));
+					for (; RTA_OK(rta, rlen); rta = RTA_NEXT(rta, rlen))
+						if (rta->rta_type == IFLA_IFNAME) {
+							snprintf(want_name, sizeof want_name, "%s", (char *)RTA_DATA(rta)); break;
+						}
+				}
 				struct rtif ifs[4]; int ni = list_ifaces(ifs, 4);
 				int sent = 0;
 				for (int i = 0; i < ni; i++) {
 					if (want_idx && ifs[i].ifindex != want_idx) continue;
+					if (want_name[0] && strcmp(ifs[i].name, want_name) != 0) continue;
 					put_link(resp, &ifs[i], seq, portid, dump);
 					sent++;
+					if (!dump) break;   /* non-dump: pontosan egy link, mint a kernel */
 				}
 				if (dump) nlmsg_put_done(resp, seq, portid);
 				else if (!sent) nlmsg_put_ack(resp, seq, portid, -19 /*ENODEV*/, nlh);
-				if (uknl_debug) fprintf(stderr, "[uknl] rtnl GETLINK (idx=%d dump=%d) -> %d link\n", want_idx, dump, sent);
+				if (uknl_debug) fprintf(stderr, "[uknl] rtnl GETLINK (idx=%d name=%s dump=%d) -> %d link\n", want_idx, want_name[0]?want_name:"-", dump, sent);
 			} else if (type == RTM_GETADDR) {
 				put_addr(resp, seq, portid, dump);
 				if (dump) nlmsg_put_done(resp, seq, portid);
