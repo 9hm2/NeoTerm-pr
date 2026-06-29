@@ -316,3 +316,10 @@ void ukernel_usb_close(void)
 	if (g_ops && g_ops->close && g_hcd) g_ops->close(g_hcd);
 	g_hcd = NULL;
 }
+
+/* Board power hooks the vendor driver calls around USB init. They live in the
+ * driver's platform/*.c, which we don't build (no specific board); the chip is
+ * already powered as a plain USB dongle, so these are no-ops. Stubbed here so the
+ * dlopen'd driver resolves them. */
+int  platform_wifi_power_on(void)  { return 0; }
+void platform_wifi_power_off(void) { }

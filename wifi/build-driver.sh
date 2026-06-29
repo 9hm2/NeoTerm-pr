@@ -85,8 +85,18 @@ RTW_CONFIG="${RTW_CONFIG:- -DDM_ODM_SUPPORT_TYPE=0x04 -DCONFIG_LITTLE_ENDIAN \
 # real ones; the sysroot still provides <stdint.h>, <stddef.h> etc. -O2 (NOT -O0:
 # the proven build NULL-derefs at -O0 in _init_timer). Mirrors rtl8812au.mk; the
 # user's chip-select (-DCONFIG_RTL8812A …) comes via "${EXTRA[@]}" and wins last.
+# -mno-outline-atomics: emit inline armv8 atomics instead of calls to libgcc's
+# __aarch64_*_acq_rel outline helpers, which the bionic daemon doesn't export
+# (the .so is dlopen'd there). Inline LL/SC works on all armv8. Probe support so
+# an old cc that lacks the flag still builds.
+ATOMIC_FLAG=()
+if echo 'int main(void){return 0;}' | "$CC" -mno-outline-atomics -x c - -o /dev/null 2>/dev/null; then
+  ATOMIC_FLAG=(-mno-outline-atomics)
+fi
+
 CFLAGS=(
   -fPIC -O2 -fno-strict-aliasing -fno-stack-protector
+  "${ATOMIC_FLAG[@]}"
   -fno-common -D_GNU_SOURCE -DKBUILD_MODNAME="\"$OUT\""
   -DUKERNEL_DRIVER_BUILD -DCONFIG_IOCTL_CFG80211
   $RTW_CONFIG

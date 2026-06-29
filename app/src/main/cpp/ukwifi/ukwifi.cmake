@@ -65,6 +65,7 @@ add_library(ukwifi_user OBJECT
   ${UKW_DIR}/hcd/mock_hcd.c         # device-less HCD backend (testing)
   ${UKW_DIR}/server/modmgr.c        # modprobe/rmmod/lsmod -> dlopen vendor driver .so
   ${UKW_DIR}/server/wsysfs.c        # /sys/class/net + /sys/class/ieee80211 writer
+  ${UKW_DIR}/shim/libc_compat.c     # __isoc23_* glibc-ABI forwarders for the dlopen'd driver
   # netlink engine (genl + full nl80211 cmds, reused from the uKernel bridge) +
   # the in-process userver_client adapter — driven by UK_OP_NL.
   ${UKW_DIR}/nl/netlink_msg.c

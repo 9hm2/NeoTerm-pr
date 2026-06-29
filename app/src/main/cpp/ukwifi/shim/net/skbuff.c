@@ -66,3 +66,10 @@ struct sk_buff *skb_dequeue(struct sk_buff_head *list)
 	skb->next = skb->prev = NULL;
 	return skb;
 }
+
+/* Drain + free every queued skb (drivers call this on stop/teardown). */
+void skb_queue_purge(struct sk_buff_head *list)
+{
+	struct sk_buff *skb;
+	while ((skb = skb_dequeue(list)) != NULL) kfree_skb(skb);
+}
