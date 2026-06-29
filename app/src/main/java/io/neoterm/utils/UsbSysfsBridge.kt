@@ -100,18 +100,38 @@ object UsbSysfsBridge {
       val name = "$bus-$dev"                              // synthetic sysfs name (unique)
       val ddir = File(devDir, name).apply { mkdirs() }   // canonical dir under /sys/devices/neoterm-usb
       val desc = UsbBridge.rawDescriptors(device.deviceName) ?: synthesize(device)
-      val cls = if (desc.size >= 5) desc[4].toInt() and 0xff else device.deviceClass
-      val numCfg = if (desc.size >= 18) desc[17].toInt() and 0xff else 1
+      fun b(i: Int) = if (desc.size > i) desc[i].toInt() and 0xff else 0
+      val cls = if (desc.size >= 5) b(4) else device.deviceClass
+      val subCls = b(5); val proto = b(6)
+      val mps0 = if (b(7) > 0) b(7) else 64
+      val bcdUsb = b(2) or (b(3) shl 8)
+      val bcdDev = b(12) or (b(13) shl 8)
+      val numCfg = if (desc.size >= 18) b(17) else 1
+      // config descriptor follows the 18-byte device descriptor
+      val co = 18
+      val numIf = if (desc.size > co + 4) b(co + 4) else 1
+      val cfgVal = if (desc.size > co + 5) b(co + 5) else 1
+      val bmAttr = if (desc.size > co + 7) b(co + 7) else 0x80
       w(ddir, "uevent",
         "DEVTYPE=usb_device\nBUSNUM=%03d\nDEVNUM=%03d\nDEVNAME=/dev/bus/usb/%03d/%03d\n"
           .format(bus, dev, bus, dev) +
-          "PRODUCT=%04x/%04x/0\nTYPE=%d/0/0\n".format(device.vendorId, device.productId, cls))
+          "PRODUCT=%x/%x/%x\nTYPE=%d/%d/%d\n".format(device.vendorId, device.productId, bcdDev, cls, subCls, proto))
       w(ddir, "busnum", "$bus\n"); w(ddir, "devnum", "$dev\n"); w(ddir, "speed", "480\n")
-      w(ddir, "bConfigurationValue", "1\n"); w(ddir, "bNumConfigurations", "$numCfg\n")
+      w(ddir, "bConfigurationValue", "$cfgVal\n"); w(ddir, "bNumConfigurations", "$numCfg\n")
       w(ddir, "idVendor", "%04x\n".format(device.vendorId))
       w(ddir, "idProduct", "%04x\n".format(device.productId))
       w(ddir, "bDeviceClass", "%02x\n".format(cls))
-      w(ddir, "bMaxPacketSize0", "64\n")
+      w(ddir, "bDeviceSubClass", "%02x\n".format(subCls))
+      w(ddir, "bDeviceProtocol", "%02x\n".format(proto))
+      w(ddir, "bMaxPacketSize0", "$mps0\n")
+      w(ddir, "bcdDevice", "%04x\n".format(bcdDev))
+      w(ddir, "version", "%2x.%02x\n".format(bcdUsb shr 8, bcdUsb and 0xff))
+      w(ddir, "bNumInterfaces", "%2d\n".format(numIf))
+      w(ddir, "bmAttributes", "%02x\n".format(bmAttr))
+      // lsusb -t and other topology-aware tools read these; we are never a hub and
+      // only model USB2, so maxchild=0 and a single rx/tx lane.
+      w(ddir, "maxchild", "0\n"); w(ddir, "rx_lanes", "1\n"); w(ddir, "tx_lanes", "1\n")
+      w(ddir, "configuration", "\n")
       wb(ddir, "descriptors", desc)
       // device's subsystem -> /sys/bus/usb (from /sys/devices/neoterm-usb/<name>)
       symlink(File(ddir, "subsystem"), "../../../bus/usb")

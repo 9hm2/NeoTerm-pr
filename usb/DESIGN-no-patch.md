@@ -404,3 +404,15 @@ Host repro (stock distro libudev, partial bind mirroring ProotManager):
 `SYSTEMD_DEVICE_VERIFY_SYSFS=0 proot -r / -0 -b busoverlay:/sys/bus
 -b usbsys3/bus/usb:/sys/bus/usb -b usbsys3/devices/neoterm-usb:/sys/devices/neoterm-usb
 udevdiag` → `udev enumerated 1 usb entries`.
+
+### Device-confirmed (Phase 1)
+
+`lsusb` and `lsusb -v` work on device with stock libusb (no patch/preload):
+`Bus 002 Device 002: ID 2357:011e TP-Link AC600 ... RTL8811AU` plus the full
+descriptor dump (device + config + interface + endpoints) straight from the
+`descriptors` blob. Added the remaining sysfs attribute files
+(`bDeviceSubClass`, `bDeviceProtocol`, `bcdDevice`, `version`, `bNumInterfaces`,
+`bmAttributes`, `maxchild`, `rx_lanes`, `tx_lanes`, `configuration`) that
+`lsusb -t` and topology-aware tools read — all derived from the descriptor, no
+I/O. Still Phase 2: opening the device node (string descriptors / `lsusb -v`'s
+"Couldn't open device", and control/bulk transfers for pyusb etc.).
