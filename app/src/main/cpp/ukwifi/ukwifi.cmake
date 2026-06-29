@@ -45,6 +45,7 @@ add_library(ukwifi_kshim OBJECT
   ${UKW_DIR}/shim/usb/usb_core.c            # USB core: usb_register, enumerate+probe, URB
   ${UKW_DIR}/stack/cfg80211/cfg80211_core.c
   ${UKW_DIR}/stack/mac80211/mac80211_core.c
+  ${UKW_DIR}/shim/fw.c                       # request_firmware -> guest /lib/firmware
   ${UKFS_DIR}/shim/compat_bionic.c
   ${UKW_SHIM_CORE})
 target_include_directories(ukwifi_kshim BEFORE PRIVATE ${UKW_INC})

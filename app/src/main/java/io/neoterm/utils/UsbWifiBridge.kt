@@ -70,6 +70,13 @@ object UsbWifiBridge {
           environment()["UK_WIFI_SYSFS_NET"] = UsbWifiSysfsBridge.netDirPath()
           environment()["UK_WIFI_SYSFS_PHY"] = UsbWifiSysfsBridge.phyDirPath()
           environment()["UK_WIFI_PROCMOD"] = UsbWifiSysfsBridge.procModPath()
+          // request_firmware() reads from the guest distro's /lib/firmware (where
+          // the firmware-realtek etc. packages install the .bin files) — the daemon
+          // runs app-side so it needs the absolute rootfs path.
+          runCatching {
+            val rootfs = io.neoterm.setup.proot.ProotManager.selectedDistro().rootfsPath()
+            environment()["UK_WIFI_FW_DIR"] = "$rootfs/lib/firmware"
+          }
         }
         .redirectErrorStream(true)
         .redirectOutput(ProcessBuilder.Redirect.to(log))

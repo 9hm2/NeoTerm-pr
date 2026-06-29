@@ -290,6 +290,29 @@ every layer, reusing the uKernel project's proven logic:
 All behind the **USB Wi-Fi** toggle / `UK_WIFI` gate, no `LD_PRELOAD`, no guest
 patching, chip-agnostic (no driver bundled).
 
+## Firmware loading (request_firmware → guest /lib/firmware) ✅
+
+In-kernel `rtlwifi`/`rtl8xxxu` drivers fetch firmware via `request_firmware()`.
+That shim entry is now a **real loader** (`ukwifi/shim/fw.c`): it reads the file
+verbatim (e.g. `rtlwifi/rtl8821aufw.bin`) from **`$UK_WIFI_FW_DIR`**, which
+`UsbWifiBridge` sets to the **guest distro's** `<rootfs>/lib/firmware` — so the
+`.bin` files installed by `firmware-realtek` (apt) are found. The daemon runs
+app-side, so it needs that absolute rootfs path (its own `/lib/firmware` is
+Android's). `request_firmware`/`_direct`/`release_firmware` are exported for a
+dlopen'd driver `.so`. (The vendor `rtl8812au` reads its efuse via
+`filp_open`/`kernel_read` instead — point its `EFUSE_MAP_PATH` at a readable
+absolute path; `fileio.c` would need vendoring for that variant.)
+
+Notes for the on-device driver:
+- `.ko` vs `.so`: the file under `/lib/modules/<uname -r>/…/<name>.ko` is only a
+  **name carrier** so the guest's `modprobe` resolves it and calls `finit_module`
+  (caught by W3a → `UK_OP_MODPROBE`); the **real driver** is `<name>.so` compiled
+  against the shim, in the daemon's module dir. `uname -r` under proot is the
+  Android kernel's, so the `/lib/modules/<that>` dir must match it (per device).
+- The right driver for RTL8811AU/8812AU is the vendor **88XXau/rtl8812au** (which
+  the uKernel project already proved); the in-kernel `rtl8xxxu` does not cover
+  these chips — pick the driver source per chip and build it to a `.so`.
+
 ## Next (not done)
 
 - **On-device end-to-end**: drop a chip's vendor driver `.so` (e.g. the proven
