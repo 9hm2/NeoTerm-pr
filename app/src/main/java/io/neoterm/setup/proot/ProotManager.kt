@@ -293,6 +293,10 @@ object ProotManager {
     // the overlay (which also carries the sensor bridge's iio) is what makes the
     // scan find anything. Paired with SYSTEMD_DEVICE_VERIFY_SYSFS=0 + UK_USB.
     io.neoterm.utils.UsbSysfsBridge.sysfsBinds().forEach { (host, guest) -> bind(args, host, guest) }
+    // Phase 2: empty /dev/bus/usb/BBB/DDD markers; the UK_USB shim turns an open()
+    // of one into a proxied handle on the app's real usbfs fd (control/bulk/URBs),
+    // so stock libusb's usbfs path works — lsusb -v, pyusb, libftdi, rtl-sdr, …
+    io.neoterm.utils.UsbSysfsBridge.devfsBinds().forEach { (host, guest) -> bind(args, host, guest) }
     runCatching { io.neoterm.utils.UsbBridge.refreshSysfs() }   // fill from current UsbManager state
 
     // Camera: expose a REAL /dev/video0 V4L2 node (proot cam shim, UK_CAM). An empty

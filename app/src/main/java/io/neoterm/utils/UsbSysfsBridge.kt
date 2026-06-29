@@ -47,6 +47,11 @@ object UsbSysfsBridge {
   // their real trees on top (proot longest-prefix match), so /sys/bus/usb and
   // /sys/bus/iio still resolve while /sys/bus itself becomes listable.
   private val busDir = File("${NeoTermPath.PROOT_ROOT_PATH}/sys-bus")
+  // Empty marker nodes at /dev/bus/usb/BBB/DDD. Phase 2: stock libusb open()s these
+  // to talk to a device; the proot UK_USB shim recognises the fd and proxies the
+  // usbfs ioctls onto the real fd the app holds (over io.neoterm.usb). The guest
+  // only ever opens an empty regular file here — the real I/O happens in the tracer.
+  private val devfsDir = File("${NeoTermPath.PROOT_ROOT_PATH}/dev-bus-usb")
 
   /** Host dir → guest path binds. */
   fun sysfsBinds(): List<Pair<String, String>> {
@@ -59,6 +64,12 @@ object UsbSysfsBridge {
       usbDir.absolutePath to "/sys/bus/usb",
       devDir.absolutePath to "/sys/devices/neoterm-usb"
     )
+  }
+
+  /** /dev/bus/usb marker tree bind (Phase 2 device I/O). */
+  fun devfsBinds(): List<Pair<String, String>> {
+    devfsDir.mkdirs()
+    return listOf(devfsDir.absolutePath to "/dev/bus/usb")
   }
 
   private fun w(dir: File, name: String, value: String) {
@@ -80,7 +91,9 @@ object UsbSysfsBridge {
   fun clear() {
     runCatching { usbDir.deleteRecursively() }
     runCatching { devDir.deleteRecursively() }
-    usbDir.mkdirs(); File(usbDir, "devices").mkdirs(); devDir.mkdirs()
+    // Keep the bound /dev/bus/usb mount point itself; only wipe its contents.
+    runCatching { devfsDir.listFiles()?.forEach { it.deleteRecursively() } }
+    usbDir.mkdirs(); File(usbDir, "devices").mkdirs(); devDir.mkdirs(); devfsDir.mkdirs()
   }
 
   /** Parse busnum/devnum out of a device name like "/dev/bus/usb/002/005". */
@@ -137,6 +150,8 @@ object UsbSysfsBridge {
       symlink(File(ddir, "subsystem"), "../../../bus/usb")
       // /sys/bus/usb/devices/<name> -> /sys/devices/neoterm-usb/<name>
       symlink(File(linksDir, name), "../../../devices/neoterm-usb/$name")
+      // /dev/bus/usb/BBB/DDD marker (empty; the UK_USB shim proxies its ioctls)
+      runCatching { File(devfsDir, "%03d/%03d".format(bus, dev)).apply { parentFile?.mkdirs() }.createNewFile() }
       n++
     }
     Kmsg.log("usb-sysfs: /sys/bus/usb populated with $n device(s)")

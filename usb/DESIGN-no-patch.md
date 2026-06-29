@@ -416,3 +416,37 @@ descriptor dump (device + config + interface + endpoints) straight from the
 `lsusb -t` and topology-aware tools read — all derived from the descriptor, no
 I/O. Still Phase 2: opening the device node (string descriptors / `lsusb -v`'s
 "Couldn't open device", and control/bulk transfers for pyusb etc.).
+
+## Phase 2 — real device I/O (usbfs proxy), implemented
+
+Stock libusb's usbfs path open()s /dev/bus/usb/BBB/DDD and drives the device
+with USBDEVFS_* ioctls. Implementation:
+
+- **Marker nodes** — `UsbSysfsBridge` writes empty files at
+  `/dev/bus/usb/BBB/DDD` (bound from `dev-bus-usb`), refreshed with the sysfs
+  tree on attach/detach/permission. The guest only ever opens an empty regular
+  file; the real I/O is proxied.
+- **fd acquisition** — on the first ioctl against such a fd, the proot UK_USB
+  shim connects to the app's abstract socket `io.neoterm.usb`, sends the device
+  path, and receives the app's real usbfs fd (the one `UsbDeviceConnection`
+  holds) via SCM_RIGHTS. That fd is a genuine kernel usbfs fd, so the proxied
+  ioctls run natively. Cached per (tgid, guest-fd); released on close.
+- **ioctl proxy** (`usb_do_ioctl`) — GET_CAPABILITIES (MMAP bit masked so libusb
+  uses malloc'd buffers), GET_SPEED, CONNECTINFO, GETDRIVER, CLAIM/RELEASE
+  INTERFACE, SET_INTERFACE/CONFIGURATION, CLEAR_HALT, RESETEP, RESET,
+  DISCONNECT_CLAIM, IOCTL (driver detach), CONTROL and BULK (data buffers
+  marshalled guest⇄tracer by direction), and the async URB path SUBMITURB /
+  REAPURB[NDELAY] / DISCARDURB (a tracer-local urb+buffer is submitted and the
+  guest's own urb address is handed back at reap, with IN data copied back).
+- **poll/ppoll** — the guest polls empty marker files (always "ready"), which
+  would busy-spin libusb's event loop; usbfs gates POLLOUT on a reapable URB, so
+  the shim polls the *real* fds instead (timeout capped at 100ms so libusb's
+  internal event pipe is still serviced). Faithful to Linux usbfs semantics.
+
+Trapped under UK_USB: ioctl, close, fstat, newfstatat, poll, ppoll (plus the
+Phase-1 netlink socket/bind/setsockopt). Host-validated end to end with a stub
+`io.neoterm.usb` server: open → connect → SCM_RIGHTS fd receive → ioctl on the
+received fd (errno propagates correctly; no hang). Real transfers validate on
+device. This is userspace libusb I/O — kernel drivers (e.g. a Wi-Fi netdev)
+still can't be loaded under proot, but pyusb/libftdi/rtl-sdr/HID and `lsusb -v`
+string descriptors work over the proxied fd.
