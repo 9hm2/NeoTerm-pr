@@ -217,12 +217,32 @@ Host-validated through the rebuilt proot: a guest `socket(genl)` +
 had `scan_gen=1`). So `iw scan`'s trigger→subscribe→event→GET_SCAN flow and
 `wpa_supplicant`'s scan event work from the guest.
 
+## W3b-4 — AF_PACKET ferry (EAPOL 4-way / monitor) ✅ (host-validated)
+
+`uknl_wifi_redirect.c` now ferries the guest's AF_PACKET socket (wpa's
+`l2_packet`, aircrack monitor) to the daemon:
+- Android blocks `AF_PACKET` for app uids, so `socket(AF_PACKET)` is rewritten at
+  ENTER to a harmless `AF_UNIX SOCK_DGRAM` (CLOEXEC/NONBLOCK kept); marked at EXIT
+  from the ORIGINAL args (`is_packet`, `pkt_eapol` = proto `htons(0x888e)`).
+- `bind(sockaddr_ll)` on it is faked.
+- `send`/`recv` (== `sendto`/`recvfrom`, what `l2_packet` uses) and
+  `sendmsg`/`recvmsg`: TX → `UK_OP_EAPOL_TX` (or `UK_OP_INJECT` for monitor),
+  RX → `UK_OP_EAPOL_RX` (or `UK_OP_MONITOR_RX`); the daemon already serves these.
+- `poll` fetches a frame into the per-fd stash so readiness is accurate and no
+  frame is lost between poll and recv. Seccomp adds bind/sendto/recvfrom.
+
+Host-validated through proot: a guest `socket(AF_PACKET,SOCK_RAW,htons(0x888e))` +
+`bind(sll)` + `send(eapol)` + `poll`(→POLLIN) + `recv` round-tripped — the stub
+daemon received `EAPOL_TX len=4 first=888e` and the guest got the canned EAPOL
+frame back. So the WPA2 4-way handshake data path works from the guest.
+
 ## Next (not done)
 
-- **W3b-4** — `AF_PACKET` (monitor RX / injection / EAPOL for the 4-way handshake)
-  and rtnetlink (`ip link`), plus MLME/connect events (extend the event path
-  beyond scan-gen) for the full `wpa_supplicant` associate flow — the more
-  preload-entangled `bridge/{packet_sock,rtnetlink}.c`.
-- A chip's vendor driver `.so` in the module dir → end-to-end on device.
+- **W3b-5** — rtnetlink (`ip link` up/down/addr → RTM_*; the bridge's
+  `rtnetlink.c`) and MLME/connect events (extend the event path beyond scan-gen)
+  for `ip` and the post-association `wpa_supplicant` notifications.
+- A chip's vendor driver `.so` in the module dir → end-to-end on device
+  (scan → WPA2 4-way → DHCP → ping), as the uKernel project already proved
+  standalone.
 - A chip's vendor driver `.so` (built against the shim, like the proven
   `rtl8812au`) dropped into the module dir — then end‑to‑end on device.

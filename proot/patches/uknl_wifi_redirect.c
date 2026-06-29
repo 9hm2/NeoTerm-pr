@@ -28,6 +28,10 @@ static int uk_wifi_on(void)
 /* wire protocol — mirrors app/src/main/cpp/ukfs/include/ukernel/proxy.h */
 struct ukw_req { uint32_t op, cmd, len; };
 struct ukw_rsp { int32_t ret; uint32_t len; };
+#define UKW_OP_EAPOL_TX  15
+#define UKW_OP_EAPOL_RX  16
+#define UKW_OP_INJECT    21
+#define UKW_OP_MONITOR_RX 22
 #define UKW_OP_MODPROBE 30
 #define UKW_OP_RMMOD    31
 #define UKW_OP_NL       33
@@ -83,6 +87,36 @@ static int ukw_nl_call(const uint8_t *req, int reqlen, uint8_t *out, int outcap)
 	return rc;
 }
 
+/* AF_PACKET TX: send a frame to the chip (EAPOL or monitor inject); returns the
+ * daemon's ret. */
+static int ukw_tx(uint32_t op, uint32_t cmd, const uint8_t *frame, int len)
+{
+	int s = ukw_connect(); if (s < 0) return -1;
+	struct ukw_req r = { op, cmd, (uint32_t) len };
+	int rc = -1;
+	if (write(s, &r, sizeof r) == (ssize_t) sizeof r &&
+	    (len <= 0 || write(s, frame, (size_t) len) == (ssize_t) len)) {
+		struct ukw_rsp rs; if (read(s, &rs, sizeof rs) == (ssize_t) sizeof rs) rc = rs.ret;
+	}
+	close(s); return rc;
+}
+
+/* AF_PACKET RX: fetch the next pending frame (EAPOL or monitor); 0 = none. */
+static int ukw_rx(uint32_t op, uint32_t cmd, uint8_t *out, int outcap)
+{
+	int s = ukw_connect(); if (s < 0) return 0;
+	struct ukw_req r = { op, cmd, 0 };
+	int got = 0;
+	if (write(s, &r, sizeof r) == (ssize_t) sizeof r) {
+		struct ukw_rsp rs;
+		if (read(s, &rs, sizeof rs) == (ssize_t) sizeof rs) {
+			int len = (int) rs.len; if (len > outcap) len = outcap;
+			while (got < len) { ssize_t k = read(s, out + got, (size_t)(len - got)); if (k <= 0) break; got += (int) k; }
+		}
+	}
+	close(s); return got;
+}
+
 /* Current scan generation (side-effect-free) — for poll readiness probing. */
 static unsigned ukw_scangen(void)
 {
@@ -117,7 +151,8 @@ static int ukw_event(unsigned last_gen, unsigned *cur, uint8_t *out, int outcap)
 
 /* Per-(tgid,genl-fd) state: a guest nl80211/genl netlink socket whose sendmsg is
  * ferried to the daemon (UK_OP_NL) and whose reply is drained by recvmsg. */
-struct wnl_fd { int used, pid, fd; uint8_t *reply; int rlen, roff; int sub; unsigned last_gen; };
+struct wnl_fd { int used, pid, fd; uint8_t *reply; int rlen, roff; int sub; unsigned last_gen;
+                int is_packet, pkt_eapol; };   /* AF_PACKET: EAPOL (0x888e) vs monitor (ETH_P_ALL) */
 #define WNL_MAX 32
 static struct wnl_fd g_wnl[WNL_MAX];
 static int g_nwnl;
@@ -145,10 +180,20 @@ void uknl_wifi_mark_socket(Tracee *tracee)
 	if (get_sysnum(tracee, ORIGINAL) != PR_socket) return;
 	int domain = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
 	int proto  = (int) peek_reg(tracee, ORIGINAL, SYSARG_3);
-	if (domain != 16 /* AF_NETLINK */ || proto != 16 /* NETLINK_GENERIC */) return;
 	int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
 	if (fd < 0) return;
-	wnl_get(ukfs_tgid(tracee->pid), fd, 1);
+	if (domain == 16 /* AF_NETLINK */ && proto == 16 /* NETLINK_GENERIC */) {
+		wnl_get(ukfs_tgid(tracee->pid), fd, 1);   /* nl80211 genl socket */
+		return;
+	}
+	if (domain == 17 /* AF_PACKET */) {
+		/* wpa's EAPOL socket (protocol htons(ETH_P_PAE=0x888e)) vs a monitor/raw
+		 * socket (htons(ETH_P_ALL) etc.). protocol is passed network-order. */
+		int be = ((proto & 0xff) << 8) | ((proto >> 8) & 0xff);
+		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), fd, 1);
+		if (w) { w->is_packet = 1; w->pkt_eapol = (be == 0x888e); }
+		return;
+	}
 }
 
 /* basename of a module path/fd-link -> bare module name: strip dirs, a leading
@@ -172,11 +217,55 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 {
 	if (!uk_wifi_on()) return false;
 
+	/* socket(AF_PACKET): Android/SELinux blocks AF_PACKET for app uids, so rewrite
+	 * it to a harmless AF_UNIX SOCK_DGRAM (keeping CLOEXEC/NONBLOCK flags) — the
+	 * guest gets a valid fd that we mark (at exit) and whose I/O we ferry. */
+	if (nr == PR_socket) {
+		if ((int) peek_reg(tracee, CURRENT, SYSARG_1) == 17 /* AF_PACKET */) {
+			int t = (int) peek_reg(tracee, CURRENT, SYSARG_2);
+			poke_reg(tracee, SYSARG_1, 1 /* AF_UNIX */);
+			poke_reg(tracee, SYSARG_2, (word_t)((t & ~0xff) | 2 /* SOCK_DGRAM */));
+			poke_reg(tracee, SYSARG_3, 0);
+		}
+		return false;   /* let it run; marked at exit from ORIGINAL args */
+	}
+	/* bind() on a marked AF_PACKET (now AF_UNIX dummy) socket: fake success (the
+	 * guest binds a sockaddr_ll the dummy can't accept; the iface is virtual). */
+	if (nr == PR_bind) {
+		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1), 0);
+		if (w && w->is_packet) UKW_RET(0);
+		return false;
+	}
+
 	/* ---- genl netlink ferry: sendmsg/recvmsg/close on a marked nl80211 fd ---- */
 	if (nr == PR_close) {
 		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1), 0);
 		if (w) wnl_free(w);
 		return false;   /* let the real close run on the placeholder netlink fd */
+	}
+	/* AF_PACKET via send()/recv() == sendto/recvfrom (wpa's l2_packet uses these,
+	 * NOT sendmsg). Buffer is a flat (buf,len), not an iov. */
+	if (nr == PR_sendto || nr == PR_recvfrom) {
+		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1), 0);
+		if (!w || !w->is_packet) return false;
+		word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
+		int len = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+		if (nr == PR_sendto) {
+			uint8_t fr[4096]; if (len > (int) sizeof fr) len = (int) sizeof fr;
+			if (len > 0) read_data(tracee, fr, buf, (word_t) len);
+			ukw_tx(w->pkt_eapol ? UKW_OP_EAPOL_TX : UKW_OP_INJECT, 0, fr, len);
+			UKW_RET(len);
+		}
+		/* recvfrom: stash-drain or fetch one frame */
+		uint8_t fr[4096]; int fl = 0; uint8_t *src = NULL; int copied = 0;
+		if (w->reply && w->roff < w->rlen) { src = w->reply + w->roff; fl = w->rlen - w->roff; }
+		else { fl = ukw_rx(w->pkt_eapol ? UKW_OP_EAPOL_RX : UKW_OP_MONITOR_RX, 0, fr, sizeof fr); src = fr; }
+		if (fl > 0) {
+			int n = len < fl ? len : fl;
+			if (write_data(tracee, buf, src, (word_t) n) == 0) { copied = n; if (w->reply && w->roff < w->rlen) w->roff += n; }
+		}
+		if (copied == 0) UKW_RET(-EAGAIN);
+		UKW_RET(copied);
 	}
 	if (nr == PR_sendmsg || nr == PR_recvmsg) {
 		int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
@@ -188,6 +277,37 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 		if (niov > 8) niov = 8;
 		struct iovec iov[8];
 		if (niov && read_data(tracee, iov, (word_t)(uintptr_t) mh.msg_iov, niov * sizeof(struct iovec)) < 0) return false;
+
+		/* ---- AF_PACKET (EAPOL 4-way handshake / monitor inject+RX) ---- */
+		if (w->is_packet) {
+			if (nr == PR_sendmsg) {
+				uint8_t fr[4096]; int total = 0;
+				for (unsigned long i = 0; i < niov; i++) {
+					int l = (int) iov[i].iov_len;
+					if (l <= 0 || total + l > (int) sizeof fr) break;
+					if (read_data(tracee, fr + total, (word_t)(uintptr_t) iov[i].iov_base, (word_t) l) < 0) break;
+					total += l;
+				}
+				ukw_tx(w->pkt_eapol ? UKW_OP_EAPOL_TX : UKW_OP_INJECT, 0, fr, total);
+				UKW_RET(total);
+			}
+			/* recvmsg: drain a poll-stashed frame, else fetch one now */
+			int copied = 0; uint8_t fr[4096]; int fl = 0; uint8_t *src = NULL;
+			if (w->reply && w->roff < w->rlen) { src = w->reply + w->roff; fl = w->rlen - w->roff; }
+			else { fl = ukw_rx(w->pkt_eapol ? UKW_OP_EAPOL_RX : UKW_OP_MONITOR_RX, 0, fr, sizeof fr); src = fr; }
+			for (unsigned long i = 0; i < niov && copied < fl; i++) {
+				int want = (int) iov[i].iov_len, avail = fl - copied;
+				int n = want < avail ? want : avail;
+				if (n <= 0) continue;
+				if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, src + copied, (word_t) n) < 0) break;
+				copied += n;
+			}
+			if (w->reply && w->roff < w->rlen) { w->roff += copied; }   /* consumed from stash */
+			if (copied == 0) UKW_RET(-EAGAIN);
+			mh.msg_namelen = 0; mh.msg_controllen = 0; mh.msg_flags = 0;
+			write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), &mh, sizeof mh);
+			UKW_RET(copied);
+		}
 
 		if (nr == PR_sendmsg) {
 			uint8_t reqbuf[16384]; int total = 0;
@@ -265,7 +385,19 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 		for (unsigned long i = 0; i < nfds; i++) {
 			struct wnl_fd *w = wnl_get(pid, pf[i].fd, 0);
 			if (!w) continue;
-			int r = (w->reply && w->roff < w->rlen) || (w->sub && gen != w->last_gen);
+			int r;
+			if (w->is_packet) {
+				/* fetch a frame into the stash so readiness is accurate (and the
+				 * frame isn't lost between poll and recvmsg) */
+				if (!(w->reply && w->roff < w->rlen)) {
+					uint8_t fr[4096];
+					int fl = ukw_rx(w->pkt_eapol ? UKW_OP_EAPOL_RX : UKW_OP_MONITOR_RX, 0, fr, sizeof fr);
+					if (fl > 0) { free(w->reply); w->reply = (uint8_t *) malloc(fl); if (w->reply) { memcpy(w->reply, fr, fl); w->rlen = fl; w->roff = 0; } }
+				}
+				r = (w->reply && w->roff < w->rlen);
+			} else {
+				r = (w->reply && w->roff < w->rlen) || (w->sub && gen != w->last_gen);
+			}
 			if (r && (pf[i].events & POLLIN)) { pf[i].revents = POLLIN; ready++; }
 		}
 		if (!ready) { struct timespec ts = { 0, 50 * 1000 * 1000 }; nanosleep(&ts, NULL); }
