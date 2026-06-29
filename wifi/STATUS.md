@@ -139,12 +139,31 @@ behaviour arrives with W3.
 `ip link` / `if_nametoindex` / `readdir(/sys/class/net)` will see the interface
 once a driver is up; full Wi‑Fi control (`iw`/`wpa_supplicant`) is nl80211 → W3.
 
+## W3a — proot module-syscall redirect (modprobe / rmmod / lsmod) ✅ (host-validated)
+
+- `proot/patches/uknl_wifi_redirect.c` (gated by `UK_WIFI`, injected after the USB
+  redirect): `finit_module(fd)` → `UK_OP_MODPROBE <name>` (name from the fd path:
+  basename minus `memfd:`/`.ko*`), `init_module(buf)` → name from the `.modinfo`
+  `name=` string, `delete_module(name)` → `UK_OP_RMMOD <name>`, all over the
+  abstract socket `@io.neoterm.wifi`; the syscall result is faked from the
+  daemon's reply.
+- Seccomp gate (`fakeid0-xattr.py`): traps `finit_module`/`init_module`/
+  `delete_module` only when `UK_WIFI` is set.
+- `lsmod`: the daemon mirrors its module list into `$UK_WIFI_PROCMOD`
+  (`modmgr.c::write_procmod`), bound over `/proc/modules` by `UsbWifiSysfsBridge`
+  — so `lsmod` reflects loaded drivers with no syscall redirect.
+
+Host-validated under the rebuilt proot: a guest calling `finit_module(rtl8812au.ko)`
++ `delete_module("rtl8812au")` made the (stub) daemon receive `OP=30
+name=rtl8812au` then `OP=31 name=rtl8812au`, and both syscalls returned 0. So the
+guest's `modprobe`/`rmmod` reach the daemon by name; `lsmod` reads the bound file.
+
 ## Next (not done)
 
-- **W3** — `uknl_wifi_redirect.c` (proot, `UK_WIFI`): the control‑plane —
-  AF_NETLINK (GENERIC+ROUTE) / AF_PACKET / wext `ioctl`s /
-  `init_module`·`finit_module`·`delete_module` / `/proc/modules` →
-  `@io.neoterm.wifi` (`UK_OP_*`). The biggest single new component; makes
-  `modprobe`/`lsmod`/`iw`/`wpa_supplicant` work from the guest.
+- **W3b** — the rest of `uknl_wifi_redirect.c`: the **netlink/packet** control‑plane
+  — `AF_NETLINK` (GENERIC nl80211 + ROUTE rtnetlink) / `AF_PACKET` / wext `ioctl`s
+  → `@io.neoterm.wifi`. Needs the nl80211/rtnetlink/packet message logic
+  (currently in the uKernel `bridge/`) moved daemon‑side. This is what makes
+  `iw` / `wpa_supplicant` / `ip link` work; the biggest remaining component.
 - A chip's vendor driver `.so` (built against the shim, like the proven
   `rtl8812au`) dropped into the module dir — then end‑to‑end on device.

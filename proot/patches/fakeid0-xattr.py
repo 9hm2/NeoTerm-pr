@@ -1094,6 +1094,44 @@ if 'uk_usb_sysnums' not in s:
                   '\t}', 1)
     wr(SC, s)
 
+# ---- syscall/enter.c: USB Wi-Fi (uKernel) control-plane redirect — gated by
+#      UK_WIFI. The C lives in patches/uknl_wifi_redirect.c; inject it before
+#      translate_syscall_enter and call its dispatch right after the USB one. ----
+EN = ROOT + "/syscall/enter.c"; s = rd(EN)
+if 'uknl_wifi_dispatch' not in s:
+    _pd = os.path.dirname(os.path.abspath(__file__))
+    wifi_c = rd(os.path.join(_pd, "uknl_wifi_redirect.c"))
+    must('int translate_syscall_enter(Tracee *tracee)\n{' in s, "enter.c translate_syscall_enter anchor (wifi)")
+    s = s.replace('int translate_syscall_enter(Tracee *tracee)\n{',
+                  wifi_c + '\nint translate_syscall_enter(Tracee *tracee)\n{', 1)
+    wifi_anchor = ('\tif (uknl_usb_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
+                   '\tstatus = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);')
+    must(wifi_anchor in s, "enter.c usb-dispatch anchor (wifi)")
+    s = s.replace(wifi_anchor,
+                  '\tif (uknl_usb_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
+                  '\tif (uknl_wifi_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
+                  '\tstatus = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);', 1)
+    wr(EN, s)
+
+# ---- syscall/seccomp.c: trap the module syscalls only when UK_WIFI is set, so
+#      the guest's modprobe/rmmod reach the uKernel Wi-Fi daemon. ----
+SC = ROOT + "/syscall/seccomp.c"; s = rd(SC)
+if 'uk_wifi_sysnums' not in s:
+    sc_anchor = 'status = merge_filtered_sysnums(tracee->ctx, &filtered_sysnums, proot_sysnums);'
+    must(sc_anchor in s, "seccomp proot_sysnums merge anchor (wifi)")
+    s = s.replace(sc_anchor, sc_anchor +
+                  '\n\t/* NeoTerm: trap module (modprobe/rmmod) syscalls for the Wi-Fi framework. */\n'
+                  '\tif (status >= 0 && getenv("UK_WIFI")) {\n'
+                  '\t\tstatic const FilteredSysnum uk_wifi_sysnums[] = {\n'
+                  '\t\t\t{ PR_finit_module,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_init_module,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_delete_module,\tFILTER_SYSEXIT },\n'
+                  '\t\t\tFILTERED_SYSNUM_END,\n'
+                  '\t\t};\n'
+                  '\t\tstatus = merge_filtered_sysnums(tracee->ctx, &filtered_sysnums, uk_wifi_sysnums);\n'
+                  '\t}', 1)
+    wr(SC, s)
+
 # ---- syscall/seccomp.c: trap the camera I/O syscalls only when UK_CAM is set. ----
 SC = ROOT + "/syscall/seccomp.c"; s = rd(SC)
 if 'uk_cam_sysnums' not in s:

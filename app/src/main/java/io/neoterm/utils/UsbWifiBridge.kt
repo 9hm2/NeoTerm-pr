@@ -69,6 +69,7 @@ object UsbWifiBridge {
           // where the daemon writes the fake /sys/class/net + /sys/class/ieee80211
           environment()["UK_WIFI_SYSFS_NET"] = UsbWifiSysfsBridge.netDirPath()
           environment()["UK_WIFI_SYSFS_PHY"] = UsbWifiSysfsBridge.phyDirPath()
+          environment()["UK_WIFI_PROCMOD"] = UsbWifiSysfsBridge.procModPath()
         }
         .redirectErrorStream(true)
         .redirectOutput(ProcessBuilder.Redirect.to(log))

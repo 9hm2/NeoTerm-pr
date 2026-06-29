@@ -20,18 +20,24 @@ import java.io.File
 object UsbWifiSysfsBridge {
   private val netDir = File("${NeoTermPath.PROOT_ROOT_PATH}/sys-class-net")
   private val phyDir = File("${NeoTermPath.PROOT_ROOT_PATH}/sys-class-ieee80211")
+  // A file the daemon writes the loaded-module list into; bound over /proc/modules
+  // so the guest's `lsmod` reflects modprobe'd drivers.
+  private val procMod = File("${NeoTermPath.PROOT_ROOT_PATH}/proc-modules")
 
   /** Host paths the daemon writes into (passed to ukwifid as env). */
   fun netDirPath(): String = netDir.absolutePath
   fun phyDirPath(): String = phyDir.absolutePath
+  fun procModPath(): String = procMod.absolutePath
 
   /** Host dir → guest path binds. */
   fun sysfsBinds(): List<Pair<String, String>> {
     netDir.mkdirs(); phyDir.mkdirs()
     seedLoopback()
+    runCatching { if (!procMod.exists()) procMod.writeText("") }   // bind target must exist
     return listOf(
       netDir.absolutePath to "/sys/class/net",
-      phyDir.absolutePath to "/sys/class/ieee80211"
+      phyDir.absolutePath to "/sys/class/ieee80211",
+      procMod.absolutePath to "/proc/modules"
     )
   }
 

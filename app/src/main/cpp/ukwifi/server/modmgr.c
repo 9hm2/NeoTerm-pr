@@ -18,6 +18,7 @@ static struct mod g_mods[UKW_MAXMOD];
 static char g_moddir[512];
 static struct ukw_mod_ops g_ops;
 static uint16_t g_vid, g_pid;
+static void write_procmod(void);   /* fwd (defined below) */
 
 void ukw_modmgr_init(const char *moddir, const struct ukw_mod_ops *ops,
                      uint16_t vid, uint16_t pid)
@@ -86,6 +87,7 @@ int ukw_modprobe(const char *name)
 	ukw_wsysfs_refresh();   /* publish /sys/class/net + /sys/class/ieee80211 */
 	m->used = 1; m->handle = h; m->size = file_size(path);
 	snprintf(m->name, sizeof m->name, "%s", name);
+	write_procmod();
 	return 0;
 }
 
@@ -96,7 +98,20 @@ int ukw_rmmod(const char *name)
 	if (g_ops.run_exits) g_ops.run_exits();
 	if (m->handle) dlclose(m->handle);
 	memset(m, 0, sizeof *m);
+	write_procmod();
 	return 0;
+}
+
+/* Mirror the module list into the bound /proc/modules file (UK_WIFI_PROCMOD) so
+ * the guest's `lsmod` (which reads /proc/modules) reflects loaded drivers. */
+static void write_procmod(void)
+{
+	const char *path = getenv("UK_WIFI_PROCMOD");
+	if (!path || !*path) return;
+	char buf[4096]; int n = ukw_lsmod(buf, sizeof buf);
+	FILE *f = fopen(path, "w"); if (!f) return;
+	if (n > 0) fwrite(buf, 1, (size_t) n, f);
+	fclose(f);
 }
 
 int ukw_lsmod(char *buf, size_t cap)
