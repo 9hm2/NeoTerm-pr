@@ -175,15 +175,33 @@ install -m 0644 "$WORK/$OUT.so" "$MODDIR/$OUT.so"
 echo "build-driver: installed $MODDIR/$OUT.so"
 
 # --- .ko name-carrier ------------------------------------------------------
-# insmod/modprobe in the guest call finit_module(fd) on a real file; the proot
-# UK_WIFI redirect reads the fd's path, extracts "<name>", and tells the daemon
-# to dlopen $UK_WIFI_MODDIR/<name>.so. So the .ko need only EXIST with the right
-# name — its bytes are never used. (modprobe also wants it under /lib/modules.)
+# insmod/modprobe in the guest call finit_module(fd); the proot UK_WIFI redirect
+# reads the fd's path, extracts "<name>", and tells the daemon to dlopen
+# $UK_WIFI_MODDIR/<name>.so — the .ko's BYTES are never loaded as a real module.
+# BUT it must still be a *parseable ELF*: modern modprobe/insmod (kmod) mmaps and
+# ELF-parses the .ko (for .modinfo / soft-deps) BEFORE it ever calls finit_module.
+# A 0-byte file fails kmod's ELF check -> EINVAL and finit_module is never reached
+# (the redirect never sees it). So emit a minimal valid relocatable ELF carrying a
+# .modinfo (name=/vermagic=/depends=) — enough for kmod to parse + depmod to index;
+# the real kernel-module validation (vermagic, layout) is the kernel's job, which
+# we fake away. depmod takes the module name from the filename, vermagic/deps from
+# .modinfo. (Same trick works for any chip: it's just $OUT.)
 KODIR="/lib/modules/$KVER/kernel/drivers/net/wireless/ukwifi"
 mkdir -p "$KODIR"
-: > "$KODIR/$OUT.ko"
+cat > "$WORK/carrier.c" <<EOF
+__attribute__((section(".modinfo"),used)) static const char _kn[]  = "name=$OUT";
+__attribute__((section(".modinfo"),used)) static const char _kv[]  = "vermagic=$KVER SMP preempt mod_unload aarch64";
+__attribute__((section(".modinfo"),used)) static const char _kd[]  = "depends=";
+__attribute__((section(".modinfo"),used)) static const char _kl[]  = "license=GPL";
+EOF
+if "$CC" -c -fno-stack-protector -o "$KODIR/$OUT.ko" "$WORK/carrier.c" 2>"$WORK/koerr"; then
+  echo "build-driver: ko-name carrier $KODIR/$OUT.ko (minimal ELF, kmod-parseable)"
+else
+  sed 's/^/  /' "$WORK/koerr" >&2
+  : > "$KODIR/$OUT.ko"
+  echo "build-driver: WARN could not compile ELF carrier; wrote empty .ko (kmod may EINVAL — use the daemon path or report this)" >&2
+fi
 ( cd "/lib/modules/$KVER" && depmod -a "$KVER" 2>/dev/null ) || true
-echo "build-driver: ko-name carrier $KODIR/$OUT.ko"
 echo
 echo "Done. Load it from the guest:"
 echo "    insmod  $KODIR/$OUT.ko        # or: modprobe $OUT"
