@@ -450,3 +450,23 @@ received fd (errno propagates correctly; no hang). Real transfers validate on
 device. This is userspace libusb I/O — kernel drivers (e.g. a Wi-Fi netdev)
 still can't be loaded under proot, but pyusb/libftdi/rtl-sdr/HID and `lsusb -v`
 string descriptors work over the proxied fd.
+
+### Phase 2 device-confirmed
+
+Stock libusb (no patch/preload) drives a real device end to end under proot:
+- `lsusb -v` resolves string descriptors via control-IN transfers
+  (manufacturer "Realtek", product "802.11ac WLAN Adapter", serial), reads the
+  BOS descriptor and GET_STATUS — all real control transfers over the proxied fd.
+- `pyusb`: set_configuration, claim/release interface, and a bulk-IN read all
+  work; a read with timeout=1000 returns ETIMEDOUT at ~1.0s (no data from the
+  uninitialised Wi-Fi chip) with no hang — proving the SUBMITURB/REAPURB +
+  timerfd-driven timeout path is correct.
+
+The timeout fix was key: libusb arms a timerfd for the deadline and polls it
+alongside the device fd; the shim mirrors the guest's timerfd/event-pipe into the
+tracer with pidfd_getfd so poll() honours the real timeout. Userspace libusb I/O
+(control/bulk/interrupt, sync + async) is complete; a kernel netdev driver still
+cannot be loaded under proot, as expected.
+
+Remaining (cosmetic): `lsusb -t` prints nothing because no synthetic root-hub
+device exists in the faked sysfs (the tree has only the attached device).
