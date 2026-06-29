@@ -170,6 +170,44 @@ Host-verified: under UK_USB the uevent socket's `SO_PROTOCOL` becomes 0
 the (available) sysfs. If enumeration is empty (sysfs readdir EACCES), add the
 fake `/sys/bus/usb`. Then `/dev/bus/usb` + the USBDEVFS ioctl proxy for I/O.
 
+## Device round 3: init WORKS, enumeration returns 0 (libudev wall)
+
+The netlink fakes worked — on device `libusb_init` now SUCCEEDS (no more -99):
+the udev event thread starts, `installing new context`, `libusb_get_device_list`
+runs. But `lsusb` is empty: `get_device_list` returns 0, because the app-uid can't
+read the real `/sys/bus/usb` device entries.
+
+Tried to make libusb enumerate from a **faked `/sys/bus/usb`** (the validated-with-
+umockdev idea). Reproduced the device's "0 devices" on host (both under proot and a
+plain bind-mount of a complete fake `/sys`) and straced it (bind-mount, no proot):
+libudev's `udev_enumerate_scan_devices` **finds `1-1`**, readlinks it, canonicalises
+to `/sys/devices/1-1` (manual `..`-walk + `/proc/self/fd`), then **discards it** and
+moves on to `/sys/class` — it never reads the device's `uevent`/`descriptors`.
+umockdev's *preload* gets past this exact step (it intercepts the path ops); a real
+faked `/sys` (bind-mount OR proot) does not. So libudev applies a path/validity
+check that a faked sysfs doesn't satisfy and that can't be cracked without diving
+deep into libudev internals.
+
+### Where this leaves the no-patch effort
+- **Solved:** `libusb_init` (the -99 that the in-distro patch's hotplug hunk
+  worked around) — via the UK_USB netlink socket/bind/setsockopt fakes. This part
+  is real, device-confirmed, and on the branch.
+- **Open:** enumeration. Two routes remain, both non-trivial and device-only:
+  1. Satisfy libudev's sysfs enumeration (the canonicalisation/validity check it
+     applies to a faked `/sys`) — opaque, no strace under proot.
+  2. **Force the usbfs path** (bypass libudev): make libusb detect sysfs as
+     *unavailable* so it runs `usbfs_get_device_list` (scan `/dev/bus/usb`, read
+     descriptors from the nodes). Avoids libudev entirely. Needs the sysfs-
+     unavailable nudge + `/dev/bus/usb` nodes serving descriptors + the USBDEVFS
+     ioctl proxy for I/O.
+
+### Recommendation
+The in-distro **patched libusb (`build-neoterm-libusb.sh`) remains the supported,
+fully-working path** (init + enumeration + I/O). The no-patch shim has unblocked
+init; completing enumeration+I/O is a real research effort. If pursued, route 2
+(force usbfs, bypass libudev) is the cleaner bet. Branch keeps all of this; master
+is untouched.
+
 ## Assessment (superseded by the breakthrough above — kept for history)
 
 The no-patch path is a real **research effort**, materially harder than the camera:
