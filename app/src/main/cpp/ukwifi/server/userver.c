@@ -126,6 +126,18 @@ static void *conn_thread(void *arg)
 			send_rsp(fd, n, nlout, (uint32_t)(n > 0 ? n : 0));
 			continue;
 		}
+		if (req.op == UK_OP_NL_SCANGEN) {
+			send_rsp(fd, (int32_t) ukw_nl_scangen(), NULL, 0);
+			continue;
+		}
+		if (req.op == UK_OP_NL_EVENT) {
+			static unsigned char evout[2048];
+			unsigned cur = 0;
+			int n = ukw_nl_event(req.cmd, &cur, evout, sizeof evout);
+			/* ret = current generation (the client stores it as last-seen) */
+			send_rsp(fd, (int32_t) cur, evout, (uint32_t)(n > 0 ? n : 0));
+			continue;
+		}
 
 		/* === vezeték nélküli opok (nem kell megnyitott file) === */
 		if (req.op == UK_OP_LIST_WIPHY) {

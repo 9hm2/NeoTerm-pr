@@ -43,3 +43,21 @@ int ukw_nl_dispatch(const uint8_t *in, size_t len, uint8_t *out, size_t cap)
 	nlb_free(&b);
 	return (int) n;
 }
+
+/* uknl_build_scan_event() is defined by nl80211_cmds.c; uknl_scan_gen above. */
+extern void uknl_build_scan_event(struct nl_buf *ev);
+
+unsigned ukw_nl_scangen(void) { return uknl_scan_gen; }
+
+int ukw_nl_event(unsigned last_gen, unsigned *cur_gen, uint8_t *out, size_t cap)
+{
+	unsigned g = uknl_scan_gen;
+	if (cur_gen) *cur_gen = g;
+	if (g == last_gen) return 0;            /* no new scan results */
+	struct nl_buf b; nlb_init(&b);
+	uknl_build_scan_event(&b);
+	size_t n = b.len < cap ? b.len : cap;
+	if (n && out) memcpy(out, b.data, n);
+	nlb_free(&b);
+	return (int) n;
+}

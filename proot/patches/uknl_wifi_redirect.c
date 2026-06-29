@@ -83,9 +83,41 @@ static int ukw_nl_call(const uint8_t *req, int reqlen, uint8_t *out, int outcap)
 	return rc;
 }
 
+/* Current scan generation (side-effect-free) — for poll readiness probing. */
+static unsigned ukw_scangen(void)
+{
+	int s = ukw_connect(); if (s < 0) return 0;
+	struct ukw_req r = { 35 /* UK_OP_NL_SCANGEN */, 0, 0 };
+	unsigned g = 0;
+	if (write(s, &r, sizeof r) == (ssize_t) sizeof r) {
+		struct ukw_rsp rs; if (read(s, &rs, sizeof rs) == (ssize_t) sizeof rs) g = (unsigned) rs.ret;
+	}
+	close(s); return g;
+}
+
+/* Fetch a pending async event for last_gen; *cur := current gen; returns event
+ * length (0 = none). UK_OP_NL_EVENT. */
+static int ukw_event(unsigned last_gen, unsigned *cur, uint8_t *out, int outcap)
+{
+	int s = ukw_connect(); if (s < 0) return 0;
+	struct ukw_req r = { 34 /* UK_OP_NL_EVENT */, last_gen, 0 };
+	int n = 0;
+	if (write(s, &r, sizeof r) == (ssize_t) sizeof r) {
+		struct ukw_rsp rs;
+		if (read(s, &rs, sizeof rs) == (ssize_t) sizeof rs) {
+			if (cur) *cur = (unsigned) rs.ret;
+			int len = (int) rs.len; if (len > outcap) len = outcap;
+			int got = 0;
+			while (got < len) { ssize_t k = read(s, out + got, (size_t)(len - got)); if (k <= 0) break; got += (int) k; }
+			n = got;
+		}
+	}
+	close(s); return n;
+}
+
 /* Per-(tgid,genl-fd) state: a guest nl80211/genl netlink socket whose sendmsg is
  * ferried to the daemon (UK_OP_NL) and whose reply is drained by recvmsg. */
-struct wnl_fd { int used, pid, fd; uint8_t *reply; int rlen, roff; };
+struct wnl_fd { int used, pid, fd; uint8_t *reply; int rlen, roff; int sub; unsigned last_gen; };
 #define WNL_MAX 32
 static struct wnl_fd g_wnl[WNL_MAX];
 static int g_nwnl;
@@ -171,20 +203,74 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			if (rl > 0) { w->reply = (uint8_t *) malloc(rl); if (w->reply) { memcpy(w->reply, rep, rl); w->rlen = rl; } }
 			UKW_RET(total);   /* report all bytes "sent" */
 		}
-		/* recvmsg: drain the stashed reply into the iov buffers */
-		if (!w->reply || w->roff >= w->rlen) UKW_RET(-EAGAIN);
+		/* recvmsg: first drain a stashed command reply (W3b-2); else, on a
+		 * subscribed event socket, deliver one async event (NEW_SCAN_RESULTS). */
 		int copied = 0;
-		for (unsigned long i = 0; i < niov && w->roff < w->rlen; i++) {
-			int want = (int) iov[i].iov_len, avail = w->rlen - w->roff;
-			int n = want < avail ? want : avail;
-			if (n <= 0) continue;
-			if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, w->reply + w->roff, (word_t) n) < 0) break;
-			w->roff += n; copied += n;
+		if (w->reply && w->roff < w->rlen) {
+			for (unsigned long i = 0; i < niov && w->roff < w->rlen; i++) {
+				int want = (int) iov[i].iov_len, avail = w->rlen - w->roff;
+				int n = want < avail ? want : avail;
+				if (n <= 0) continue;
+				if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, w->reply + w->roff, (word_t) n) < 0) break;
+				w->roff += n; copied += n;
+			}
+		} else if (w->sub) {
+			uint8_t ev[2048]; unsigned cur = w->last_gen;
+			int el = ukw_event(w->last_gen, &cur, ev, sizeof ev);
+			w->last_gen = cur;
+			for (unsigned long i = 0; i < niov && copied < el; i++) {
+				int want = (int) iov[i].iov_len, avail = el - copied;
+				int n = want < avail ? want : avail;
+				if (n <= 0) continue;
+				if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, ev + copied, (word_t) n) < 0) break;
+				copied += n;
+			}
 		}
+		if (copied == 0) UKW_RET(-EAGAIN);
 		/* a netlink dgram socket reports no src address / no control data */
 		mh.msg_namelen = 0; mh.msg_controllen = 0; mh.msg_flags = 0;
 		write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), &mh, sizeof mh);
 		UKW_RET(copied);
+	}
+
+	/* setsockopt(SOL_NETLINK, NETLINK_ADD_MEMBERSHIP) on a marked fd: record the
+	 * subscription so recvmsg/poll deliver async events, and fake success (the
+	 * real subscribe to our fake group on the placeholder socket is meaningless).
+	 * last_gen=0 so a scan that already completed (iw triggers *then* subscribes)
+	 * is still delivered once. */
+	if (nr == PR_setsockopt) {
+		int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), fd, 0);
+		if (!w) return false;
+		int level = (int) peek_reg(tracee, CURRENT, SYSARG_2);
+		int optname = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+		if (level == 270 && optname == 1) { w->sub = 1; w->last_gen = 0; }
+		UKW_RET(0);
+	}
+
+	/* poll/ppoll: a marked fd is readable when a stashed reply remains or (for a
+	 * subscribed event socket) a newer scan completed. Engage only when the set
+	 * contains a marked fd; cap the wait so the guest re-polls (events arrive). */
+	if (nr == PR_poll || nr == PR_ppoll) {
+		unsigned long nfds = (unsigned long) peek_reg(tracee, CURRENT, SYSARG_2);
+		if (nfds == 0 || nfds > 16) return false;
+		word_t fa = peek_reg(tracee, CURRENT, SYSARG_1);
+		struct pollfd pf[16];
+		if (read_data(tracee, pf, fa, nfds * sizeof(struct pollfd)) < 0) return false;
+		int pid = ukfs_tgid(tracee->pid), nwifi = 0;
+		for (unsigned long i = 0; i < nfds; i++) { pf[i].revents = 0; if (wnl_get(pid, pf[i].fd, 0)) nwifi++; }
+		if (nwifi == 0) return false;
+		unsigned gen = ukw_scangen();
+		int ready = 0;
+		for (unsigned long i = 0; i < nfds; i++) {
+			struct wnl_fd *w = wnl_get(pid, pf[i].fd, 0);
+			if (!w) continue;
+			int r = (w->reply && w->roff < w->rlen) || (w->sub && gen != w->last_gen);
+			if (r && (pf[i].events & POLLIN)) { pf[i].revents = POLLIN; ready++; }
+		}
+		if (!ready) { struct timespec ts = { 0, 50 * 1000 * 1000 }; nanosleep(&ts, NULL); }
+		write_data(tracee, fa, pf, nfds * sizeof(struct pollfd));
+		UKW_RET(ready);
 	}
 
 	if (nr == PR_finit_module) {

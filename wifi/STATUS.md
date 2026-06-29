@@ -196,15 +196,33 @@ ferried through a stub `@io.neoterm.wifi` running the real nl engine. So
 synchronous genl/nl80211 commands (`iw dev`, `iw list`, `iw dev wlan0 info/link`,
 GET_SCAN dump, CONNECT, NEW_KEY) work from the guest.
 
+## W3b-3 — async scan events (NEW_SCAN_RESULTS) ✅ (host-validated)
+
+Generation-based event delivery (mirrors the bridge's `uknl_scan_gen`/late-
+subscriber logic):
+- daemon: `ukw_nl_scangen()` (current gen, side-effect-free) and
+  `ukw_nl_event(last_gen)` (builds a NEW_SCAN_RESULTS via the reused
+  `uknl_build_scan_event` if a newer scan completed), served as
+  `UK_OP_NL_SCANGEN` / `UK_OP_NL_EVENT`.
+- proot: `setsockopt(SOL_NETLINK, NETLINK_ADD_MEMBERSHIP)` on a marked fd records
+  the subscription (`last_gen=0` so an already-completed scan still fires once)
+  and fakes success; `recvmsg` on a subscribed fd (with no stashed reply) returns
+  one NEW_SCAN_RESULTS when the gen advanced; `poll`/`ppoll` reports the fd
+  readable when a stash remains or `scangen != last_gen` (50ms cap so the guest
+  re-polls). Seccomp adds setsockopt/poll/ppoll.
+
+Host-validated through the rebuilt proot: a guest `socket(genl)` +
+`setsockopt(ADD_MEMBERSHIP, scan)` + `poll` (→ POLLIN) + `recvmsg` received a
+36-byte `nlmsg_type=0x24 cmd=NL80211_CMD_NEW_SCAN_RESULTS` event (the stub daemon
+had `scan_gen=1`). So `iw scan`'s trigger→subscribe→event→GET_SCAN flow and
+`wpa_supplicant`'s scan event work from the guest.
+
 ## Next (not done)
 
-- **W3b-3** — async **multicast events**: the daemon pushes NEW_SCAN_RESULTS / MLME
-  to subscribed guest sockets; proot delivers them via `poll`/`recvmsg` on the
-  marked event fd (needs `uknl_mcast_send` wired to a per-fd event queue +
-  `setsockopt(NETLINK_ADD_MEMBERSHIP)` tracking + a poll emulation like the USB
-  shim). Required by `iw scan` / `wpa_supplicant`'s event loop.
-- **W3b-4** — `AF_PACKET` (monitor RX / injection / EAPOL) and rtnetlink (`ip
-  link`): the more preload-entangled `bridge/{packet_sock,rtnetlink}.c`.
+- **W3b-4** — `AF_PACKET` (monitor RX / injection / EAPOL for the 4-way handshake)
+  and rtnetlink (`ip link`), plus MLME/connect events (extend the event path
+  beyond scan-gen) for the full `wpa_supplicant` associate flow — the more
+  preload-entangled `bridge/{packet_sock,rtnetlink}.c`.
 - A chip's vendor driver `.so` in the module dir → end-to-end on device.
 - A chip's vendor driver `.so` (built against the shim, like the proven
   `rtl8812au`) dropped into the module dir — then end‑to‑end on device.
