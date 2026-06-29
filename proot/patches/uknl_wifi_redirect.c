@@ -350,6 +350,25 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			}
 			uint8_t rep[16384];
 			int rl = ukw_nl_call(w->is_route ? UKW_OP_RTNL : UKW_OP_NL, reqbuf, total, rep, sizeof rep);
+			/* iproute2 sends requests with nlmsg_pid=0 and ACCEPTS a reply only if
+			 * its nlmsg_pid equals the socket's own bound port; the daemon echoes the
+			 * request pid (0), so iproute2 skips every reply and busy-loops. Rewrite
+			 * each reply nlmsghdr's nlmsg_pid (offset 12) to the socket's real local
+			 * port (getsockname on the placeholder netlink socket). libnl already
+			 * uses its local port in requests, so this is a no-op for it. */
+			if (rl > 0) {
+				struct uk_snl_l { uint16_t f, pad; uint32_t pid, grp; } la;
+				socklen_t ll = sizeof la;
+				if (getsockname(fd, (void *) &la, &ll) == 0 && la.pid != 0) {
+					int o = 0;
+					while (o + 16 <= rl) {
+						uint32_t ml; memcpy(&ml, rep + o, 4);
+						if (ml < 16 || o + (int) ml > rl) break;
+						memcpy(rep + o + 12, &la.pid, 4);
+						o += (int)((ml + 3) & ~3u);
+					}
+				}
+			}
 			free(w->reply); w->reply = NULL; w->rlen = 0; w->roff = 0;
 			if (rl > 0) { w->reply = (uint8_t *) malloc(rl); if (w->reply) { memcpy(w->reply, rep, rl); w->rlen = rl; } }
 			ukw_dlog("sendmsg fd=%d %s req=%d -> reply=%d\n", fd, w->is_route ? "rtnl" : "genl", total, rl);
