@@ -380,16 +380,22 @@ int main(int argc, char **argv)
 	}
 	if (nmodules == 0) { usage(argv[0]); return 1; }
 
-	char shimbuf[1024];
-	if (!shim_path) {
-		char self[1024]; snprintf(self, sizeof(self), "%s", argv[0]);
-		snprintf(shimbuf, sizeof(shimbuf), "%s/libkernel_shim.so", dirname(self));
-		shim_path = shimbuf;
+	/* Two deployment models:
+	 *  - separate .so (dev/host): --shim libkernel_shim.so → dlopen it.
+	 *  - single binary (NeoTerm libukwifid.so): the shim + cfg80211 are statically
+	 *    linked into this image, so resolve the symbols from our OWN global scope
+	 *    via dlopen(NULL). (The image is linked with -Wl,--export-dynamic so its
+	 *    symbols are in the dynamic table for dlsym and for a dlopen'd driver.) */
+	void *sh;
+	if (shim_path) {
+		printf("uServer: shim betöltése: %s\n", shim_path);
+		sh = dlopen(shim_path, RTLD_NOW | RTLD_GLOBAL);
+		if (!sh) { fprintf(stderr, "uServer: shim dlopen hiba: %s\n", dlerror()); return 2; }
+	} else {
+		printf("uServer: beépített shim (single-binary)\n");
+		sh = dlopen(NULL, RTLD_NOW | RTLD_GLOBAL);
+		if (!sh) { fprintf(stderr, "uServer: self dlopen hiba: %s\n", dlerror()); return 2; }
 	}
-
-	printf("uServer: shim betöltése: %s\n", shim_path);
-	void *sh = dlopen(shim_path, RTLD_NOW | RTLD_GLOBAL);
-	if (!sh) { fprintf(stderr, "uServer: shim dlopen hiba: %s\n", dlerror()); return 2; }
 
 	A.set_loglevel = must_sym(sh, "ukernel_set_loglevel");
 	A.set_hcd      = must_sym(sh, "ukernel_set_hcd");

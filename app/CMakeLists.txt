@@ -16,6 +16,15 @@ if(UKFS_BUILD)
   include(${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp/ukfs/ukfs.cmake)
 endif()
 
+# uKernel Wi-Fi framework (chip-agnostic; no driver bundled) — builds the
+# libukwifid.so daemon (shim + cfg80211 + usbfs HCD + userver). A chip's vendor
+# driver .so is dlopen'd at runtime. See src/main/cpp/ukwifi/ukwifi.cmake and
+# wifi/DESIGN.md. Disable with -DUKWIFI_BUILD=OFF.
+option(UKWIFI_BUILD "Build the uKernel Wi-Fi framework daemon" ON)
+if(UKWIFI_BUILD)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp/ukwifi/ukwifi.cmake)
+endif()
+
 #add_library(nexec
 #             SHARED
 #             src/main/cpp/exec.c)

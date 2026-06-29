@@ -46,15 +46,42 @@ $CC -c -fPIC -O2 -D_GNU_SOURCE -pthread -idirafter $INC $WARN \
    app/src/main/cpp/ukwifi/hcd/usbfs_hcd.c app/src/main/cpp/ukwifi/server/userver.c
 ```
 
-`ukwifi.cmake` is standalone‑validated; it is **not yet wired into
-`app/CMakeLists.txt`** (that happens with W0b, when the daemon links).
+## W0b — runnable daemon `libukwifid.so` ✅ (links)
+
+- Added `shim/usb/usb_core.c` (USB core: `usb_register`/enumerate/probe/URB) and
+  `hcd/mock_hcd.c` (device‑less backend) to the vendored set.
+- Adapted `server/userver.c` for **single‑binary** use: with no `--shim`, it
+  resolves the kernel‑API symbols from its own image via `dlopen(NULL)` (the shim
+  + cfg80211 are statically linked in); it still `dlopen`s only the chip's driver
+  `.so` at runtime. The image is linked with `-Wl,--export-dynamic` so those
+  symbols are visible to `dlsym` and to the dlopen'd driver.
+- `ukwifi.cmake` now builds the `ukwifid` executable → **`libukwifid.so`** (PIE,
+  AGP‑packaged like `ukfsd`); wired into `app/CMakeLists.txt` behind
+  `option(UKWIFI_BUILD ON)`.
+
+**Result (NDK r26b, aarch64, android‑26, bionic):** `libukwifid.so` configures,
+compiles and **links with 0 errors / 0 undefined symbols** (496 KB ELF64 DYN/PIE;
+NEEDED only libc/libm/libdl). It exports the 266 dynamic symbols a driver needs
+(`usb_register_driver`, `wiphy_new`, `cfg80211_inform_bss`, `ieee80211_alloc_hw`,
+`ukernel_*`, …). Combined `ukfs` + `ukwifi` configure is conflict‑free. Still no
+driver bundled — chip‑agnostic.
+
+Reproduce the daemon link:
+
+```sh
+NDK=/opt/android-ndk-r26b
+cat > /tmp/ukw/CMakeLists.txt <<X
+cmake_minimum_required(VERSION 3.10)
+project(ukw C)
+include(/abs/path/app/src/main/cpp/ukwifi/ukwifi.cmake)
+X
+cmake -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -S /tmp/ukw -B /tmp/ukw/out
+cmake --build /tmp/ukw/out --target ukwifid     # -> libukwifid.so
+```
 
 ## Next (not done)
 
-- **W0b** — assemble the runnable `libukwifid.so`: adapt `userver` for
-  single‑binary use (skip the `dlopen` of the now‑statically‑linked
-  shim/cfg80211; keep the driver `dlopen`), link `ukwifi_framework` +
-  `ukfs` core shim, wire `ukwifi.cmake` into the app build behind an option.
 - **W1+** — per `DESIGN.md`: `UsbWifiBridge.kt` launch + chip claim; bring a
   chip up (`probe`/`ndo_open`) once a driver `.so` is provided; the
   `/sys/class/net` + `/sys/class/ieee80211` bridge; the `uknl_wifi_redirect.c`

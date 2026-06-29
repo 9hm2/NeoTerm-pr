@@ -42,6 +42,7 @@ add_library(ukwifi_kshim OBJECT
   ${UKW_DIR}/shim/net/netdev.c
   ${UKW_DIR}/shim/net/skbuff.c
   ${UKW_DIR}/shim/net/ieee80211.c
+  ${UKW_DIR}/shim/usb/usb_core.c            # USB core: usb_register, enumerate+probe, URB
   ${UKW_DIR}/stack/cfg80211/cfg80211_core.c
   ${UKW_DIR}/stack/mac80211/mac80211_core.c
   ${UKFS_DIR}/shim/compat_bionic.c
@@ -56,12 +57,23 @@ target_compile_options(ukwifi_kshim PRIVATE ${UKW_CFLAGS} -DKBUILD_MODNAME="ukwi
 # ============================================================================
 add_library(ukwifi_user OBJECT
   ${UKW_DIR}/hcd/usbfs_hcd.c        # URB <-> USBDEVFS over the io.neoterm.usb fd
-  ${UKW_DIR}/server/userver.c)      # loader + UK_OP_* proxy (io.neoterm.wifi)
+  ${UKW_DIR}/hcd/mock_hcd.c)        # device-less HCD backend (testing)
 target_compile_options(ukwifi_user PRIVATE ${UKW_CFLAGS} -idirafter ${UKW_INC})
 
-# Aggregate framework (driver-independent). The runnable daemon target
-# (libukwifid.so) is added in W0b once userver is adapted for single-binary use.
-add_library(ukwifi_framework STATIC
+# ============================================================================
+# ukwifid: the io.neoterm.wifi daemon (loader + UK_OP_* proxy), single-binary.
+# Output as libukwifid.so (a PIE executable) so AGP packages it into jniLibs and
+# Android extracts it executable to nativeLibraryDir — same trick as ukfsd. The
+# shim + cfg80211 are statically linked in; userver resolves them via dlopen(NULL)
+# (hence -Wl,--export-dynamic), and dlopens only the chip's vendor driver .so at
+# runtime. No driver is bundled.
+# ============================================================================
+add_executable(ukwifid
+  ${UKW_DIR}/server/userver.c
   $<TARGET_OBJECTS:ukwifi_kshim>
   $<TARGET_OBJECTS:ukwifi_user>)
-set_target_properties(ukwifi_framework PROPERTIES LINKER_LANGUAGE C)
+set_target_properties(ukwifid PROPERTIES PREFIX "lib" OUTPUT_NAME "ukwifid" SUFFIX ".so")
+# userver.c is userspace: real headers win, fake tree only for ukernel/*.h.
+target_compile_options(ukwifid PRIVATE ${UKW_CFLAGS} -idirafter ${UKW_INC})
+target_link_options(ukwifid PRIVATE -Wl,--export-dynamic)
+target_link_libraries(ukwifid dl)
