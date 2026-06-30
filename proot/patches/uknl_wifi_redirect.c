@@ -378,11 +378,15 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			write_data(tracee, arg + 16, &idx, sizeof idx);
 			UKW_RET(0);
 		}
-		case 0x8927: {   /* SIOCGIFHWADDR -> ARPHRD_ETHER + chip MAC */
+		case 0x8927: {   /* SIOCGIFHWADDR -> ARP type + chip MAC */
 			uint8_t mac[6]; ukw_iface_mac(mac);
-			uint8_t sa[8]; sa[0] = 1; sa[1] = 0; memcpy(sa + 2, mac, 6);   /* sa_family=1 (ETHER) */
+			/* aircrack reads ifr_hwaddr.sa_family as the ARP link type and rejects a
+			 * monitor iface that isn't ARPHRD_IEEE80211_*. We deliver radiotap frames,
+			 * so report ARPHRD_IEEE80211_RADIOTAP (803) in monitor mode, else ETHER. */
+			uint16_t fam = (g_wext_mode == 6) ? 803 : 1;
+			uint8_t sa[8]; memcpy(sa, &fam, 2); memcpy(sa + 2, mac, 6);
 			write_data(tracee, arg + 16, sa, sizeof sa);
-			ukw_dlog("ioctl SIOCGIFHWADDR %s -> %02x:%02x:%02x:%02x:%02x:%02x\n", name, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+			ukw_dlog("ioctl SIOCGIFHWADDR %s -> arp=%u %02x:%02x:%02x:%02x:%02x:%02x\n", name, fam, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
 			UKW_RET(0);
 		}
 		case 0x8913: {   /* SIOCGIFFLAGS: UP|BROADCAST|RUNNING|MULTICAST */
