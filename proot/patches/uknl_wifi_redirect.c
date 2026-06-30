@@ -19,6 +19,7 @@
  * read_string, readlink_proc_pid_fd, set_sysnum(PR_void), PR_*, SYSARG_*, CURRENT.
  */
 static int g_uk_wifi = -1;
+static uint32_t g_wext_mode = 0;   /* last WEXT SIOCSIWMODE (6=monitor, 2=managed) */
 static int uk_wifi_on(void)
 {
 	if (g_uk_wifi < 0) { const char *e = getenv("UK_WIFI"); g_uk_wifi = (e && *e && *e != '0') ? 1 : 0; }
@@ -360,8 +361,10 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 		word_t cmd = peek_reg(tracee, CURRENT, SYSARG_2);
 		switch (cmd) {
 		case 0x8927: case 0x8933: case 0x8913: case 0x8914:
-		case 0x8921: case 0x8915: case 0x891b: case 0x8924: break;
-		default: return false;   /* not a SIOCGIF* we handle */
+		case 0x8921: case 0x8915: case 0x891b: case 0x8924:   /* SIOCGIF* */
+		case 0x8B01: case 0x8B04: case 0x8B05: case 0x8B06: case 0x8B07:   /* WEXT */
+			break;
+		default: return false;   /* not an ioctl we handle */
 		}
 		word_t arg = peek_reg(tracee, CURRENT, SYSARG_3);
 		if (!arg) return false;
@@ -397,6 +400,40 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			write_data(tracee, arg + 16, sin, sizeof sin); UKW_RET(0);
 		}
 		case 0x8924:     /* SIOCSIFHWADDR (macchanger): accept */
+			UKW_RET(0);
+		/* ---- WEXT (wireless extensions) — aircrack/iwconfig monitor path ---- */
+		case 0x8B01: {   /* SIOCGIWNAME -> wireless protocol name (recognises it as wifi) */
+			char wn[16]; memset(wn, 0, sizeof wn); memcpy(wn, "IEEE 802.11", 11);
+			write_data(tracee, arg + 16, wn, sizeof wn);
+			UKW_RET(0);
+		}
+		case 0x8B06: {   /* SIOCSIWMODE: set mode (u.mode @off16). 6=monitor, 2=managed. */
+			uint32_t mode = 0; read_data(tracee, &mode, arg + 16, sizeof mode);
+			g_wext_mode = mode;
+			ukw_tx(20 /* UK_OP_SET_MONITOR */, (0u << 1) | (mode == 6 ? 1u : 0u), NULL, 0);
+			ukw_dlog("ioctl SIOCSIWMODE %s -> mode=%u\n", name, mode);
+			UKW_RET(0);
+		}
+		case 0x8B07: {   /* SIOCGIWMODE -> current mode */
+			uint32_t mode = g_wext_mode ? g_wext_mode : 2u;
+			write_data(tracee, arg + 16, &mode, sizeof mode);
+			UKW_RET(0);
+		}
+		case 0x8B04: {   /* SIOCSIWFREQ: set channel/freq (struct iw_freq @off16) */
+			int32_t m = 0; int16_t e = 0;
+			read_data(tracee, &m, arg + 16, sizeof m);
+			read_data(tracee, &e, arg + 20, sizeof e);
+			int freq;
+			if (e == 0) {   /* m is a channel number */
+				freq = (m == 14) ? 2484 : (m <= 14 ? 2407 + m * 5 : 5000 + m * 5);
+			} else {        /* m * 10^e Hz -> MHz */
+				freq = m; while (e > 6) { freq *= 10; e--; } while (e < 6) { freq /= 10; e++; }
+			}
+			ukw_tx(23 /* UK_OP_SET_CHANNEL */, (0u << 16) | (uint32_t) freq, NULL, 0);
+			ukw_dlog("ioctl SIOCSIWFREQ %s -> %d MHz\n", name, freq);
+			UKW_RET(0);
+		}
+		case 0x8B05:     /* SIOCGIWFREQ: best-effort no-op (airodump tolerates) */
 			UKW_RET(0);
 		}
 		return false;
