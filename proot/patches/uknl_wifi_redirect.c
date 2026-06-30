@@ -289,9 +289,29 @@ static void ukw_ferry_and_stash(struct wnl_fd *w, int fd, const uint8_t *reqbuf,
 	 * (NL80211_CMD_TRIGGER_SCAN 33). */
 	if (!w->is_route && total >= 20) {
 		uint16_t nltype; memcpy(&nltype, reqbuf + 4, 2);
-		if (nltype == 0x24 && reqbuf[16] == 33) {
+		uint8_t gcmd = reqbuf[16];
+		if (nltype == 0x24 && gcmd == 33) {   /* NL80211_CMD_TRIGGER_SCAN */
 			w->sub = 1; w->last_gen = 0;
 			ukw_dlog("auto-sub: TRIGGER_SCAN fd=%d -> sub=1\n", fd);
+		}
+		/* Track the REAL chip mode from nl80211 SET_INTERFACE (cmd 6) — this is what
+		 * `iw dev wlan0 set type monitor` / airmon-ng use (the proven monitor path).
+		 * Scan the request attrs for NL80211_ATTR_IFTYPE (5): MONITOR(6)/STATION(2).
+		 * SIOCGIFHWADDR then reports ARPHRD_IEEE80211_RADIOTAP iff the chip is truly
+		 * in monitor mode (set via iw), not a WEXT lie. */
+		if (nltype == 0x24 && gcmd == 6 && total >= 24) {
+			int o = 20;   /* after nlmsghdr(16) + genlmsghdr(4) */
+			while (o + 4 <= total) {
+				uint16_t alen, atype;
+				memcpy(&alen, reqbuf + o, 2); memcpy(&atype, reqbuf + o + 2, 2);
+				if (alen < 4 || o + (int) alen > total) break;
+				if ((atype & 0x3fff) == 5 /* NL80211_ATTR_IFTYPE */ && alen >= 8) {
+					uint32_t it; memcpy(&it, reqbuf + o + 4, 4);
+					g_wext_mode = (it == 6) ? 6 : 2;
+					ukw_dlog("nl80211 SET_INTERFACE iftype=%u -> mode=%u\n", it, g_wext_mode);
+				}
+				o += ((int) alen + 3) & ~3;
+			}
 		}
 	}
 	ukw_dlog("ferry fd=%d %s req=%d -> reply=%d\n", fd, w->is_route ? "rtnl" : "genl", total, rl);
