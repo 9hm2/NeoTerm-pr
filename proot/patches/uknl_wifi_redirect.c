@@ -164,6 +164,27 @@ static int ukw_event(unsigned last_gen, unsigned *cur, uint8_t *out, int outcap)
 	close(s); return n;
 }
 
+/* Fetch the chip MAC (and presence) from the daemon (UK_OP_GET_IFACE). mac[6] is
+ * zeroed on failure. uk_iface_info layout: name[16], mac[6] at offset 16. */
+static int ukw_iface_mac(uint8_t mac[6])
+{
+	memset(mac, 0, 6);
+	int s = ukw_connect(); if (s < 0) return -1;
+	struct ukw_req r = { 13 /* UK_OP_GET_IFACE */, 0 /* netdev idx 0 = wlan0 */, 0 };
+	int rc = -1;
+	if (write(s, &r, sizeof r) == (ssize_t) sizeof r) {
+		struct ukw_rsp rs;
+		if (read(s, &rs, sizeof rs) == (ssize_t) sizeof rs && rs.ret == 0 && rs.len >= 22) {
+			uint8_t info[256]; int len = (int) rs.len; if (len > (int) sizeof info) len = sizeof info;
+			int got = 0;
+			while (got < len) { ssize_t k = read(s, info + got, (size_t)(len - got)); if (k <= 0) break; got += (int) k; }
+			if (got >= 22) { memcpy(mac, info + 16, 6); rc = 0; }
+		}
+	}
+	close(s);
+	return rc;
+}
+
 /* Per-(tgid,genl-fd) state: a guest nl80211/genl netlink socket whose sendmsg is
  * ferried to the daemon (UK_OP_NL) and whose reply is drained by recvmsg. */
 struct wnl_fd { int used, pid, fd; uint8_t *reply; int rlen, roff; int sub; unsigned last_gen;
@@ -329,6 +350,56 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 		if (aa && cp) write_data(tracee, aa, &snl, cp);
 		if (la) write_data(tracee, la, &want, sizeof want);
 		UKW_RET(0);
+	}
+
+	/* SIOCGIF* ioctls on our virtual wlanN (airodump/aircrack/ifconfig query the
+	 * MAC, index, flags, MTU via these on an AF_INET/AF_PACKET socket). Android
+	 * denies them on a real socket (no host wlan0), so answer from the daemon.
+	 * Keyed on the ifr_name (wlan*), so real interfaces fall through untouched. */
+	if (nr == PR_ioctl) {
+		word_t cmd = peek_reg(tracee, CURRENT, SYSARG_2);
+		switch (cmd) {
+		case 0x8927: case 0x8933: case 0x8913: case 0x8914:
+		case 0x8921: case 0x8915: case 0x891b: case 0x8924: break;
+		default: return false;   /* not a SIOCGIF* we handle */
+		}
+		word_t arg = peek_reg(tracee, CURRENT, SYSARG_3);
+		if (!arg) return false;
+		char name[16];
+		if (read_data(tracee, name, arg, sizeof name) < 0) return false;
+		name[15] = '\0';
+		if (strncmp(name, "wlan", 4) != 0) return false;   /* not our virtual iface */
+		switch (cmd) {
+		case 0x8933: {   /* SIOCGIFINDEX */
+			int idx = 3;   /* wlan0 (and wlan0mon) -> ifindex 3, single chip */
+			write_data(tracee, arg + 16, &idx, sizeof idx);
+			UKW_RET(0);
+		}
+		case 0x8927: {   /* SIOCGIFHWADDR -> ARPHRD_ETHER + chip MAC */
+			uint8_t mac[6]; ukw_iface_mac(mac);
+			uint8_t sa[8]; sa[0] = 1; sa[1] = 0; memcpy(sa + 2, mac, 6);   /* sa_family=1 (ETHER) */
+			write_data(tracee, arg + 16, sa, sizeof sa);
+			ukw_dlog("ioctl SIOCGIFHWADDR %s -> %02x:%02x:%02x:%02x:%02x:%02x\n", name, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+			UKW_RET(0);
+		}
+		case 0x8913: {   /* SIOCGIFFLAGS: UP|BROADCAST|RUNNING|MULTICAST */
+			short flags = 0x1 | 0x2 | 0x40 | 0x1000;
+			write_data(tracee, arg + 16, &flags, sizeof flags);
+			UKW_RET(0);
+		}
+		case 0x8914:     /* SIOCSIFFLAGS (promisc/up): accept (chip monitor set via iw) */
+			UKW_RET(0);
+		case 0x8921: {   /* SIOCGIFMTU */
+			int mtu = 1500; write_data(tracee, arg + 16, &mtu, sizeof mtu); UKW_RET(0);
+		}
+		case 0x8915: case 0x891b: {   /* SIOCGIFADDR / SIOCGIFNETMASK: sockaddr_in, 0 addr */
+			uint8_t sin[8] = { 2, 0, 0, 0, 0, 0, 0, 0 };   /* AF_INET, 0.0.0.0 */
+			write_data(tracee, arg + 16, sin, sizeof sin); UKW_RET(0);
+		}
+		case 0x8924:     /* SIOCSIFHWADDR (macchanger): accept */
+			UKW_RET(0);
+		}
+		return false;
 	}
 
 	/* ---- genl netlink ferry: sendmsg/recvmsg/close on a marked nl80211 fd ---- */
