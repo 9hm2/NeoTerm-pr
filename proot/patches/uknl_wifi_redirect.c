@@ -372,6 +372,24 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			}
 			free(w->reply); w->reply = NULL; w->rlen = 0; w->roff = 0;
 			if (rl > 0) { w->reply = (uint8_t *) malloc(rl); if (w->reply) { memcpy(w->reply, rep, rl); w->rlen = rl; } }
+			/* Auto-subscribe the triggering socket to scan events. iw normally
+			 * resolves the "scan" mcast group (nl_get_multicast_id) then subscribes
+			 * via setsockopt(NETLINK_ADD_MEMBERSHIP); but that nested-attr resolution
+			 * is fragile across libnl versions and when it fails iw never subscribes,
+			 * so NEW_SCAN_RESULTS is never delivered and `iw scan` hangs forever in
+			 * recvmsg. The socket that sent TRIGGER_SCAN is exactly the one that then
+			 * waits for the result, so mark it subscribed (sub=1) and reset its event
+			 * generation (last_gen=0) -> the next recvmsg on it delivers the scan-done
+			 * event regardless of whether the formal subscription succeeded.
+			 * nlmsghdr.nlmsg_type @off 4 (==nl80211 family id 0x24), genlmsghdr.cmd
+			 * @off 16 (==NL80211_CMD_TRIGGER_SCAN 33). */
+			if (!w->is_route && total >= 20) {
+				uint16_t nltype; memcpy(&nltype, reqbuf + 4, 2);
+				if (nltype == 0x24 && reqbuf[16] == 33) {
+					w->sub = 1; w->last_gen = 0;
+					ukw_dlog("auto-sub: TRIGGER_SCAN fd=%d -> sub=1\n", fd);
+				}
+			}
 			ukw_dlog("sendmsg fd=%d %s req=%d -> reply=%d\n", fd, w->is_route ? "rtnl" : "genl", total, rl);
 			UKW_RET(total);   /* report all bytes "sent" */
 		}
