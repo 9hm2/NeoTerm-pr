@@ -209,6 +209,35 @@ static struct wnl_fd *wnl_get(int pid, int fd, int create)
 }
 static void wnl_free(struct wnl_fd *w) { if (w) { free(w->reply); memset(w, 0, sizeof *w); } }
 
+/* Deliver exactly ONE captured frame for a marked AF_PACKET socket into the
+ * tracee buffer (dst,cap). aircrack/airodump read() one radiotap frame per call,
+ * so the daemon's MONITOR_RX batch ([len LE16][frame]..) must be split here; EAPOL
+ * RX is a single frame. Returns bytes written, or -EAGAIN when nothing is pending.
+ * The whole frame is consumed even if the caller's buffer truncated it. */
+static int ukw_packet_recv_one(Tracee *tracee, struct wnl_fd *w, word_t dst, int cap)
+{
+	if (!(w->reply && w->roff < w->rlen)) {
+		free(w->reply); w->reply = NULL; w->rlen = 0; w->roff = 0;
+		uint8_t fr[8192];
+		int fl = ukw_rx(w->pkt_eapol ? UKW_OP_EAPOL_RX : UKW_OP_MONITOR_RX, 0, fr, sizeof fr);
+		if (fl <= 0) return -EAGAIN;
+		w->reply = (uint8_t *) malloc(fl);
+		if (!w->reply) return -EAGAIN;
+		memcpy(w->reply, fr, fl); w->rlen = fl; w->roff = 0;
+	}
+	int avail = w->rlen - w->roff, flen, hdr;
+	if (w->pkt_eapol) { flen = avail; hdr = 0; }            /* EAPOL: stash is one frame */
+	else {                                                   /* MONITOR: [len LE16][frame] */
+		if (avail < 2) { w->roff = w->rlen; return -EAGAIN; }
+		flen = w->reply[w->roff] | (w->reply[w->roff + 1] << 8); hdr = 2;
+		if (flen <= 0 || hdr + flen > avail) { w->roff = w->rlen; return -EAGAIN; }
+	}
+	int n = cap < flen ? cap : flen;
+	if (n > 0 && write_data(tracee, dst, w->reply + w->roff + hdr, (word_t) n) < 0) return -EAGAIN;
+	w->roff += hdr + flen;
+	return n;
+}
+
 /* Mark a genl (NETLINK_GENERIC) socket at socket() EXIT so its sendmsg/recvmsg
  * get ferried. Called from translate_syscall_exit. Only NETLINK_GENERIC (nl80211)
  * — NETLINK_ROUTE/uevent are left alone (rtnetlink = a later step; the libusb
@@ -509,16 +538,18 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			ukw_tx(w->pkt_eapol ? UKW_OP_EAPOL_TX : UKW_OP_INJECT, 0, fr, len);
 			UKW_RET(len);
 		}
-		/* recvfrom: stash-drain or fetch one frame */
-		uint8_t fr[4096]; int fl = 0; uint8_t *src = NULL; int copied = 0;
-		if (w->reply && w->roff < w->rlen) { src = w->reply + w->roff; fl = w->rlen - w->roff; }
-		else { fl = ukw_rx(w->pkt_eapol ? UKW_OP_EAPOL_RX : UKW_OP_MONITOR_RX, 0, fr, sizeof fr); src = fr; }
-		if (fl > 0) {
-			int n = len < fl ? len : fl;
-			if (write_data(tracee, buf, src, (word_t) n) == 0) { copied = n; if (w->reply && w->roff < w->rlen) w->roff += n; }
-		}
-		if (copied == 0) UKW_RET(-EAGAIN);
-		UKW_RET(copied);
+		/* recvfrom: deliver ONE captured frame (monitor batch is split per-frame). */
+		UKW_RET(ukw_packet_recv_one(tracee, w, buf, len));
+	}
+	/* read() on a marked AF_PACKET socket: aircrack/airodump capture with read(),
+	 * not recvfrom — deliver one captured frame the same way. (read isn't trapped by
+	 * default; the wifi seccomp adds it under UK_WIFI.) Non-packet reads fall through. */
+	if (nr == PR_read) {
+		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1), 0);
+		if (!w || !w->is_packet) return false;
+		word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
+		int count = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+		UKW_RET(ukw_packet_recv_one(tracee, w, buf, count));
 	}
 	if (nr == PR_sendmsg || nr == PR_recvmsg) {
 		int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
@@ -544,19 +575,11 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 				ukw_tx(w->pkt_eapol ? UKW_OP_EAPOL_TX : UKW_OP_INJECT, 0, fr, total);
 				UKW_RET(total);
 			}
-			/* recvmsg: drain a poll-stashed frame, else fetch one now */
-			int copied = 0; uint8_t fr[4096]; int fl = 0; uint8_t *src = NULL;
-			if (w->reply && w->roff < w->rlen) { src = w->reply + w->roff; fl = w->rlen - w->roff; }
-			else { fl = ukw_rx(w->pkt_eapol ? UKW_OP_EAPOL_RX : UKW_OP_MONITOR_RX, 0, fr, sizeof fr); src = fr; }
-			for (unsigned long i = 0; i < niov && copied < fl; i++) {
-				int want = (int) iov[i].iov_len, avail = fl - copied;
-				int n = want < avail ? want : avail;
-				if (n <= 0) continue;
-				if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, src + copied, (word_t) n) < 0) break;
-				copied += n;
-			}
-			if (w->reply && w->roff < w->rlen) { w->roff += copied; }   /* consumed from stash */
-			if (copied == 0) UKW_RET(-EAGAIN);
+			/* recvmsg: deliver ONE captured frame into the first iov (monitor batch
+			 * is split per-frame by the helper; aircrack uses a single iov). */
+			if (niov == 0) UKW_RET(-EAGAIN);
+			int copied = ukw_packet_recv_one(tracee, w, (word_t)(uintptr_t) iov[0].iov_base, (int) iov[0].iov_len);
+			if (copied < 0) UKW_RET(copied);
 			mh.msg_namelen = 0; mh.msg_controllen = 0; mh.msg_flags = 0;
 			write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), &mh, sizeof mh);
 			UKW_RET(copied);

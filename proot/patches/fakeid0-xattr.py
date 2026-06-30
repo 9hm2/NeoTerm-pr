@@ -1132,6 +1132,7 @@ if 'uk_wifi_sysnums' not in s:
                   '\t\t\t{ PR_recvmsg,\tFILTER_SYSEXIT },\n'
                   '\t\t\t{ PR_sendto,\tFILTER_SYSEXIT },\t/* AF_PACKET send()/recv() (l2_packet) */\n'
                   '\t\t\t{ PR_recvfrom,\tFILTER_SYSEXIT },\n'
+                  '\t\t\t{ PR_read,\tFILTER_SYSEXIT },\t/* aircrack captures via read() on the AF_PACKET fd */\n'
                   '\t\t\t{ PR_setsockopt,\tFILTER_SYSEXIT },\t/* NETLINK_ADD_MEMBERSHIP (event subscribe) */\n'
                   '\t\t\t{ PR_getsockname,\tFILTER_SYSEXIT },\t/* rtnl: deterministic local nl_pid */\n'
                   '\t\t\t{ PR_poll,\tFILTER_SYSEXIT },\t/* event readiness (scan-done) */\n'
