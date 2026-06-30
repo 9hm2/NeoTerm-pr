@@ -168,7 +168,8 @@ static int ukw_event(unsigned last_gen, unsigned *cur, uint8_t *out, int outcap)
  * ferried to the daemon (UK_OP_NL) and whose reply is drained by recvmsg. */
 struct wnl_fd { int used, pid, fd; uint8_t *reply; int rlen, roff; int sub; unsigned last_gen;
                 int is_packet, pkt_eapol;   /* AF_PACKET: EAPOL (0x888e) vs monitor (ETH_P_ALL) */
-                int is_route; };            /* AF_NETLINK NETLINK_ROUTE (ip link/addr) */
+                int is_route;               /* AF_NETLINK NETLINK_ROUTE (ip link/addr) */
+                uint32_t fake_port; };      /* rtnl: deterministic local nl_pid (getsockname + reply stamp) */
 #define WNL_MAX 32
 static struct wnl_fd g_wnl[WNL_MAX];
 static int g_nwnl;
@@ -204,7 +205,12 @@ void uknl_wifi_mark_socket(Tracee *tracee)
 	}
 	if (domain == 16 /* AF_NETLINK */ && proto == 0 /* NETLINK_ROUTE */) {
 		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), fd, 1);   /* rtnetlink (ip) */
-		if (w) w->is_route = 1;
+		/* Deterministic local port: iproute2 reads its bound port via getsockname
+		 * and then ACCEPTS a reply only if nlmsg_pid == that port. We can't query
+		 * the guest's real socket from the tracer, so we hand out a fixed fake port
+		 * (per slot) via the getsockname intercept and stamp every rtnl reply with
+		 * the same value so they always match. (Like the uKernel backup's 0x1000+idx.) */
+		if (w) { w->is_route = 1; w->fake_port = 0x4000u + (uint32_t)(w - g_wnl); }
 		return;
 	}
 	if (domain == 17 /* AF_PACKET */) {
@@ -233,6 +239,41 @@ static void ukw_modname(const char *path, char *out, size_t osz)
 }
 
 #define UKW_RET(v) do { poke_reg(tracee, SYSARG_RESULT, (word_t)(long)(v)); set_sysnum(tracee, PR_void); return true; } while (0)
+
+/* Ferry a complete netlink request (flat buffer) to the daemon and stash the
+ * reply for recvmsg/recvfrom delivery. Shared by sendmsg (iov-gathered) and
+ * sendto (flat). Handles the rtnl reply pid-stamp and TRIGGER_SCAN auto-subscribe. */
+static void ukw_ferry_and_stash(struct wnl_fd *w, int fd, const uint8_t *reqbuf, int total)
+{
+	uint8_t rep[16384];
+	int rl = ukw_nl_call(w->is_route ? UKW_OP_RTNL : UKW_OP_NL, reqbuf, total, rep, sizeof rep);
+	/* rtnl: iproute2 accepts a reply only if its nlmsg_pid == the socket's bound
+	 * port. We hand out w->fake_port via the getsockname intercept, so stamp every
+	 * reply nlmsghdr's pid (offset 12) to it. genl (libnl) puts its own port in
+	 * requests and the daemon echoes it, so genl needs no stamp. */
+	if (rl > 0 && w->is_route && w->fake_port) {
+		int o = 0;
+		while (o + 16 <= rl) {
+			uint32_t ml; memcpy(&ml, rep + o, 4);
+			if (ml < 16 || o + (int) ml > rl) break;
+			memcpy(rep + o + 12, &w->fake_port, 4);
+			o += (int)((ml + 3) & ~3u);
+		}
+	}
+	free(w->reply); w->reply = NULL; w->rlen = 0; w->roff = 0;
+	if (rl > 0) { w->reply = (uint8_t *) malloc(rl); if (w->reply) { memcpy(w->reply, rep, rl); w->rlen = rl; } }
+	/* auto-subscribe the triggering socket to scan events (see recvmsg event branch):
+	 * nlmsghdr.nlmsg_type @off 4 (nl80211 family 0x24), genlmsghdr.cmd @off 16
+	 * (NL80211_CMD_TRIGGER_SCAN 33). */
+	if (!w->is_route && total >= 20) {
+		uint16_t nltype; memcpy(&nltype, reqbuf + 4, 2);
+		if (nltype == 0x24 && reqbuf[16] == 33) {
+			w->sub = 1; w->last_gen = 0;
+			ukw_dlog("auto-sub: TRIGGER_SCAN fd=%d -> sub=1\n", fd);
+		}
+	}
+	ukw_dlog("ferry fd=%d %s req=%d -> reply=%d\n", fd, w->is_route ? "rtnl" : "genl", total, rl);
+}
 
 static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 {
@@ -267,6 +308,28 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 		if (w && w->is_packet) UKW_RET(0);
 		return false;
 	}
+	/* getsockname() on a marked rtnl socket: return a deterministic sockaddr_nl with
+	 * our fake local port. iproute2 reads its bound port here and then only accepts
+	 * replies whose nlmsg_pid == that port; we stamp every rtnl reply with the same
+	 * w->fake_port (see ukw_ferry_and_stash), so they always match. (genl is left to
+	 * the real getsockname on the placeholder socket — libnl already works there.) */
+	if (nr == PR_getsockname) {
+		int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), fd, 0);
+		if (!w || !w->is_route || !w->fake_port) return false;
+		word_t aa = peek_reg(tracee, CURRENT, SYSARG_2);
+		word_t la = peek_reg(tracee, CURRENT, SYSARG_3);
+		struct uk_snl_g { uint16_t nl_family, nl_pad; uint32_t nl_pid, nl_groups; } snl;
+		memset(&snl, 0, sizeof snl);
+		snl.nl_family = 16 /* AF_NETLINK */;
+		snl.nl_pid = w->fake_port;
+		socklen_t want = (socklen_t) sizeof snl, have = want;
+		if (la) read_data(tracee, &have, la, sizeof have);
+		socklen_t cp = have < want ? have : want;
+		if (aa && cp) write_data(tracee, aa, &snl, cp);
+		if (la) write_data(tracee, la, &want, sizeof want);
+		UKW_RET(0);
+	}
 
 	/* ---- genl netlink ferry: sendmsg/recvmsg/close on a marked nl80211 fd ---- */
 	if (nr == PR_close) {
@@ -277,10 +340,37 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 	/* AF_PACKET via send()/recv() == sendto/recvfrom (wpa's l2_packet uses these,
 	 * NOT sendmsg). Buffer is a flat (buf,len), not an iov. */
 	if (nr == PR_sendto || nr == PR_recvfrom) {
-		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1), 0);
-		if (!w || !w->is_packet) return false;
+		int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+		struct wnl_fd *w = wnl_get(ukfs_tgid(tracee->pid), fd, 0);
+		if (!w) return false;
 		word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
 		int len = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+		/* netlink (rtnl/genl) over sendto/recvfrom: iproute2 sends dump requests with
+		 * sendto() (NOT sendmsg) and may read with recvfrom(); ferry them like the
+		 * sendmsg/recvmsg path so the daemon sees the request and the reply is stashed.
+		 * Without this `ip link` (a GETLINK dump via sendto) never reached the daemon
+		 * and iproute2 spun on an empty recvmsg. */
+		if (!w->is_packet) {
+			if (nr == PR_sendto) {
+				uint8_t reqbuf[16384]; int total = len > (int) sizeof reqbuf ? (int) sizeof reqbuf : len;
+				if (total > 0) read_data(tracee, reqbuf, buf, (word_t) total);
+				ukw_ferry_and_stash(w, fd, reqbuf, total);
+				UKW_RET(len);
+			}
+			/* recvfrom: deliver ONE stashed netlink message into the flat buffer. */
+			int rflags = (int) peek_reg(tracee, CURRENT, SYSARG_4);
+			int rpeek = (rflags & 2 /* MSG_PEEK */) != 0;
+			if (w->reply && w->roff < w->rlen) {
+				int avail = w->rlen - w->roff, mlen = avail;
+				if (avail >= 4) { uint32_t l; memcpy(&l, w->reply + w->roff, 4); if (l >= 16 && (int) l <= avail) mlen = (int) l; }
+				int n = len < mlen ? len : mlen;
+				if (n > 0 && write_data(tracee, buf, w->reply + w->roff, (word_t) n) < 0) n = 0;
+				if (!rpeek) { int adv = (mlen + 3) & ~3; w->roff += (adv <= avail ? adv : avail); }
+				ukw_dlog("recvfrom fd=%d %s peek=%d len=%d mlen=%d roff=%d/%d\n", fd, w->is_route ? "rtnl" : "genl", rpeek, len, mlen, w->roff, w->rlen);
+				UKW_RET(rpeek ? mlen : n);
+			}
+			UKW_RET(-EAGAIN);
+		}
 		if (nr == PR_sendto) {
 			uint8_t fr[4096]; if (len > (int) sizeof fr) len = (int) sizeof fr;
 			if (len > 0) read_data(tracee, fr, buf, (word_t) len);
@@ -348,49 +438,7 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 				if (read_data(tracee, reqbuf + total, (word_t)(uintptr_t) iov[i].iov_base, (word_t) l) < 0) break;
 				total += l;
 			}
-			uint8_t rep[16384];
-			int rl = ukw_nl_call(w->is_route ? UKW_OP_RTNL : UKW_OP_NL, reqbuf, total, rep, sizeof rep);
-			/* iproute2 (rtnl) sends requests with nlmsg_pid=0 and ACCEPTS a reply only
-			 * if its nlmsg_pid equals the socket's own bound port; the daemon echoes
-			 * the request pid (0), so iproute2 skips every reply and busy-loops.
-			 * Rewrite each reply nlmsghdr's nlmsg_pid (offset 12) to the socket's real
-			 * local port (getsockname). ONLY for rtnl: libnl (genl) already puts its
-			 * own port in requests and the daemon echoes it, so genl needs no stamp —
-			 * and stamping it regressed the genl path. */
-			if (rl > 0 && w->is_route) {
-				struct uk_snl_l { uint16_t f, pad; uint32_t pid, grp; } la;
-				socklen_t ll = sizeof la;
-				if (getsockname(fd, (void *) &la, &ll) == 0 && la.pid != 0) {
-					int o = 0;
-					while (o + 16 <= rl) {
-						uint32_t ml; memcpy(&ml, rep + o, 4);
-						if (ml < 16 || o + (int) ml > rl) break;
-						memcpy(rep + o + 12, &la.pid, 4);
-						o += (int)((ml + 3) & ~3u);
-					}
-				}
-			}
-			free(w->reply); w->reply = NULL; w->rlen = 0; w->roff = 0;
-			if (rl > 0) { w->reply = (uint8_t *) malloc(rl); if (w->reply) { memcpy(w->reply, rep, rl); w->rlen = rl; } }
-			/* Auto-subscribe the triggering socket to scan events. iw normally
-			 * resolves the "scan" mcast group (nl_get_multicast_id) then subscribes
-			 * via setsockopt(NETLINK_ADD_MEMBERSHIP); but that nested-attr resolution
-			 * is fragile across libnl versions and when it fails iw never subscribes,
-			 * so NEW_SCAN_RESULTS is never delivered and `iw scan` hangs forever in
-			 * recvmsg. The socket that sent TRIGGER_SCAN is exactly the one that then
-			 * waits for the result, so mark it subscribed (sub=1) and reset its event
-			 * generation (last_gen=0) -> the next recvmsg on it delivers the scan-done
-			 * event regardless of whether the formal subscription succeeded.
-			 * nlmsghdr.nlmsg_type @off 4 (==nl80211 family id 0x24), genlmsghdr.cmd
-			 * @off 16 (==NL80211_CMD_TRIGGER_SCAN 33). */
-			if (!w->is_route && total >= 20) {
-				uint16_t nltype; memcpy(&nltype, reqbuf + 4, 2);
-				if (nltype == 0x24 && reqbuf[16] == 33) {
-					w->sub = 1; w->last_gen = 0;
-					ukw_dlog("auto-sub: TRIGGER_SCAN fd=%d -> sub=1\n", fd);
-				}
-			}
-			ukw_dlog("sendmsg fd=%d %s req=%d -> reply=%d\n", fd, w->is_route ? "rtnl" : "genl", total, rl);
+			ukw_ferry_and_stash(w, fd, reqbuf, total);
 			UKW_RET(total);   /* report all bytes "sent" */
 		}
 		/* recvmsg: first drain a stashed command reply (W3b-2); else, on a
