@@ -402,6 +402,23 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 		int peek = (recv_flags & 2 /* MSG_PEEK */) != 0;
 		int copied = 0;     /* bytes actually written to the caller's iov */
 		int msglen = -1;    /* full length of the delivered message (>=0 if one is available) */
+		/* If nothing is stashed and the socket is subscribed, fetch the next async
+		 * event (NEW_SCAN_RESULTS/MLME) INTO the stash, so the peek-aware delivery
+		 * below consumes it EXACTLY ONCE. (Delivering directly here was a bug: libnl
+		 * does MSG_PEEK then a real read; the peek fetched the event and advanced
+		 * last_gen, so the real read got nothing -> the event was lost and iw spun
+		 * forever in recvmsg.) */
+		if (!(w->reply && w->roff < w->rlen) && w->sub) {
+			uint8_t ev[2048]; unsigned cur = w->last_gen;
+			int el = ukw_event(w->last_gen, &cur, ev, sizeof ev);
+			ukw_dlog("event fd=%d sub=1 last_gen=%u -> cur=%u el=%d\n", fd, w->last_gen, cur, el);
+			w->last_gen = cur;
+			if (el > 0) {
+				free(w->reply);
+				w->reply = (uint8_t *) malloc(el);
+				if (w->reply) { memcpy(w->reply, ev, el); w->rlen = el; w->roff = 0; }
+			}
+		}
 		if (w->reply && w->roff < w->rlen) {
 			/* Deliver exactly ONE netlink message per recvmsg, mirroring the
 			 * kernel's datagram semantics. libnl/iproute2 stop parsing a datagram
@@ -426,22 +443,6 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 			if (!peek) {                       /* peek must not consume */
 				int adv = (mlen + 3) & ~3;     /* NLMSG_ALIGN to the next message */
 				w->roff += (adv <= avail ? adv : avail);
-			}
-		} else if (w->sub) {
-			uint8_t ev[2048]; unsigned cur = w->last_gen;
-			int el = ukw_event(w->last_gen, &cur, ev, sizeof ev);
-			ukw_dlog("event fd=%d sub=1 last_gen=%u -> cur=%u el=%d\n", fd, w->last_gen, cur, el);
-			w->last_gen = cur;
-			if (el > 0) {
-				int off = 0;
-				for (unsigned long i = 0; i < niov && off < el; i++) {
-					int want = (int) iov[i].iov_len, rem = el - off;
-					int n = want < rem ? want : rem;
-					if (n <= 0) continue;
-					if (write_data(tracee, (word_t)(uintptr_t) iov[i].iov_base, ev + off, (word_t) n) < 0) break;
-					off += n;
-				}
-				copied = off; msglen = el;
 			}
 		}
 		ukw_dlog("recvmsg fd=%d %s peek=%d niov=%lu iov0=%d msglen=%d copied=%d sub=%d roff=%d/%d\n",
