@@ -138,6 +138,11 @@ static int cmd_trigger_scan(const struct nl_req *req, struct nl_buf *resp)
 	if (req->nlh->nlmsg_flags & NLM_F_ACK)
 		nlmsg_put_ack(resp, req->nlh->nlmsg_seq, req->nlh->nlmsg_pid, 0, req->nlh);
 	uknl_send(resp);   /* korai flush: ACK most megy */
+	/* A scan-hez a netdev-nek UP-nak kell lennie (ndo_open: RF be + RX-pump).
+	 * A guest gyakran scannel `ip link set up` nélkül (vagy az rtnl-up még nem
+	 * futott le), ezért itt implicit felhozzuk az interfészt — különben a chip
+	 * RF-je ki van kapcsolva és a scan 0 BSS-t ad. Idempotens: ha már UP, no-op. */
+	uk_set_ifflags(0, 1);
 	/* valós scan (a uServer megvárja a befejezést) */
 	uk_scan(UKNL_WIPHY_IDX);
 	/* a BSS-eket AZONNAL lekérjük és cache-eljük (amíg a szerver biztosan él) */
@@ -173,6 +178,7 @@ static int cmd_get_scan(const struct nl_req *req, struct nl_buf *resp)
 {
 	/* ha nincs cache (pl. `iw scan dump` előzetes trigger nélkül), most scannelünk */
 	if (g_bss_cached == 0) {
+		uk_set_ifflags(0, 1);   /* RF/RX UP (lásd TRIGGER_SCAN) */
 		uk_scan(UKNL_WIPHY_IDX);
 		for (int i = 0; i < MAX_CACHE; i++) {
 			if (uk_get_bss(UKNL_WIPHY_IDX, i, &g_bss_cache[g_bss_cached]) != 0) break;

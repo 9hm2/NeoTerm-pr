@@ -412,6 +412,7 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 		} else if (w->sub) {
 			uint8_t ev[2048]; unsigned cur = w->last_gen;
 			int el = ukw_event(w->last_gen, &cur, ev, sizeof ev);
+			ukw_dlog("event fd=%d sub=1 last_gen=%u -> cur=%u el=%d\n", fd, w->last_gen, cur, el);
 			w->last_gen = cur;
 			if (el > 0) {
 				int off = 0;
@@ -466,6 +467,7 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 		int level = (int) peek_reg(tracee, CURRENT, SYSARG_2);
 		int optname = (int) peek_reg(tracee, CURRENT, SYSARG_3);
 		if (level == 270 && optname == 1) { w->sub = 1; w->last_gen = 0; }
+		ukw_dlog("setsockopt fd=%d level=%d opt=%d -> sub=%d\n", fd, level, optname, w->sub);
 		UKW_RET(0);
 	}
 
