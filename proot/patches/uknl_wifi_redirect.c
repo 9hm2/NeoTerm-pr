@@ -218,7 +218,10 @@ static int ukw_packet_recv_one(Tracee *tracee, struct wnl_fd *w, word_t dst, int
 {
 	if (!(w->reply && w->roff < w->rlen)) {
 		free(w->reply); w->reply = NULL; w->rlen = 0; w->roff = 0;
-		uint8_t fr[8192];
+		/* Drain the whole daemon batch (ukernel_monitor_rx_get fills up to 64 KiB);
+		 * a smaller buffer would truncate the response and lose the already-dequeued
+		 * tail frames. Static: the proot tracer event loop is single-threaded. */
+		static uint8_t fr[65536];
 		int fl = ukw_rx(w->pkt_eapol ? UKW_OP_EAPOL_RX : UKW_OP_MONITOR_RX, 0, fr, sizeof fr);
 		if (fl <= 0) return -EAGAIN;
 		w->reply = (uint8_t *) malloc(fl);
@@ -715,7 +718,7 @@ static bool uknl_wifi_dispatch(Tracee *tracee, word_t nr)
 				/* fetch a frame into the stash so readiness is accurate (and the
 				 * frame isn't lost between poll and recvmsg) */
 				if (!(w->reply && w->roff < w->rlen)) {
-					uint8_t fr[4096];
+					static uint8_t fr[65536];   /* full batch drain (match daemon; small buf drops frames) */
 					int fl = ukw_rx(w->pkt_eapol ? UKW_OP_EAPOL_RX : UKW_OP_MONITOR_RX, 0, fr, sizeof fr);
 					if (fl > 0) { free(w->reply); w->reply = (uint8_t *) malloc(fl); if (w->reply) { memcpy(w->reply, fr, fl); w->rlen = fl; w->roff = 0; } }
 				}
